@@ -894,7 +894,9 @@ class CFFITest
 
 	func test_sizeof_pointer
 		nSize = cffi_sizeof("ptr")
-		if isWindows64() or (isLinux() and getarch() = "x64") or (isMacOSX() and getarch() = "x64")
+		arch = getarch()
+		is64 = ((arch = "x64") or (arch = "arm64"))
+		if is64
 			assert(nSize = 8, "sizeof(ptr) should be 8 on 64-bit")
 		else
 			assert(nSize = 4, "sizeof(ptr) should be 4 on 32-bit")
@@ -906,4 +908,16 @@ class CFFITest
 
 	func test_sizeof_long
 		nSize = cffi_sizeof("long")
-		assert(nSize >= 4, "sizeof(long) should be at least 4")
+		if isWindows()
+			# On Windows, long is ALWAYS 4 bytes (LLP64)
+			assertEq(nSize, 4, "sizeof(long) should be 4 on Windows")
+		else
+			# On Linux/macOS, long is 8 bytes on 64-bit (LP64)
+			arch = getarch()
+			is64 = ((arch = "x64") or (arch = "arm64"))
+			if is64
+				assertEq(nSize, 8, "sizeof(long) should be 8 on 64-bit Unix")
+			else
+				assertEq(nSize, 4, "sizeof(long) should be 4 on 32-bit Unix")
+			ok
+		ok
