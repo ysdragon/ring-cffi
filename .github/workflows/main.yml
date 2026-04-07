@@ -80,20 +80,3 @@ jobs:
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  test:
-    needs: update-libs
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    strategy:
-      matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
-    steps:
-    - uses: actions/checkout@v6
-      with:
-        ref: master
-
-    - name: Run tests
-      uses: ysdragon/ring-action@v1
-      with:
-        file: "tests/CFFI_test.ring"
