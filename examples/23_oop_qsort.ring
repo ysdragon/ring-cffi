@@ -2,7 +2,7 @@
  * Example 23: OOP - Complete Example: qsort from libc
  * API: FFI (alloc, sizeof, offset, ptrGet, ptrSet, cFunc, callback, invoke)
  */
-load "../lib.ring"
+load "cffi.ring"
 
 oFFI = new FFI("libc.so.6")
 

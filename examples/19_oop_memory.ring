@@ -2,7 +2,7 @@
  * Example 19: OOP - Memory Management
  * API: FFI (alloc, sizeof, nullptr, isNullPtr, ptrGet, ptrSet)
  */
-load "../lib.ring"
+load "cffi.ring"
 
 oFFI = new FFI("libc.so.6")
 

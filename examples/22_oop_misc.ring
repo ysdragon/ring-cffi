@@ -2,7 +2,7 @@
  * Example 22: OOP - Enums, Callbacks, Strings, Errors, CDef
  * API: FFI (enum, enumValue, callback, string, toString, sym, isNullPtr, errno, strError, cdef)
  */
-load "../lib.ring"
+load "cffi.ring"
 
 oFFI = new FFI("libc.so.6")
 

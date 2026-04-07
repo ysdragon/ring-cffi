@@ -2,7 +2,7 @@
  * Example 09: Unions (C API)
  * API: cffi_union, cffi_union_new, cffi_union_size, cffi_field
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

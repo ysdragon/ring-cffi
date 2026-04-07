@@ -2,7 +2,7 @@
  * Example 15: Errors (C API)
  * API: cffi_errno, cffi_strerror
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

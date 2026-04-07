@@ -2,7 +2,7 @@
  * Example 18: OOP - Function Calling
  * API: FFI (cFunc, funcPtr, varFunc, invoke, varcall, sym, string)
  */
-load "../lib.ring"
+load "cffi.ring"
 
 oFFI = new FFI("libc.so.6")
 

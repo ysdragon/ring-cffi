@@ -2,7 +2,7 @@
  * Example 10: Enums (C API)
  * API: cffi_enum, cffi_enum_value
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

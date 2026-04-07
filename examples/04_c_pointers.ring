@@ -2,7 +2,7 @@
  * Example 04: Pointer Operations (C API)
  * API: cffi_nullptr, cffi_isnull, cffi_deref, cffi_offset, cffi_get, cffi_set
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

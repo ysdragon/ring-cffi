@@ -2,7 +2,7 @@
  * Example 02: Call C Functions (C API)
  * API: cffi_func, cffi_invoke, cffi_string, cffi_tostring
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

@@ -2,7 +2,7 @@
  * Example 17: OOP - Library Loading
  * API: FFI (init, loadLib, library)
  */
-load "../lib.ring"
+load "cffi.ring"
 
 # Constructor loading
 oFFI = new FFI("libc.so.6")

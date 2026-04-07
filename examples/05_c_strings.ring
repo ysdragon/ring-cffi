@@ -2,7 +2,7 @@
  * Example 05: Strings (C API)
  * API: cffi_string, cffi_tostring
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

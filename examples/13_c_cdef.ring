@@ -2,7 +2,7 @@
  * Example 13: C Definition Parser (C API)
  * API: cffi_cdef
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

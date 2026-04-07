@@ -2,7 +2,7 @@
  * Example 08: Structs (C API)
  * API: cffi_struct, cffi_struct_new, cffi_field, cffi_field_offset, cffi_struct_size
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

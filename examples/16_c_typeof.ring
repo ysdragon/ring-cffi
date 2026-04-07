@@ -2,7 +2,7 @@
  * Example 16: typeof (C API)
  * API: cffi_typeof
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

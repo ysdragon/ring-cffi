@@ -2,7 +2,7 @@
  * Example 07: Function Pointers (C API)
  * API: cffi_funcptr, cffi_invoke
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

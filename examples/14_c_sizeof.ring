@@ -2,7 +2,7 @@
  * Example 14: sizeof (C API)
  * API: cffi_sizeof
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

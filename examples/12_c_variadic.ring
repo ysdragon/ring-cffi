@@ -2,7 +2,7 @@
  * Example 12: Variadic Functions (C API)
  * API: cffi_varfunc, cffi_varcall
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

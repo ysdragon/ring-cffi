@@ -2,7 +2,7 @@
  * Example 11: Callbacks (C API)
  * API: cffi_callback
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

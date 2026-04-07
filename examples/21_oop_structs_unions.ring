@@ -2,7 +2,7 @@
  * Example 21: OOP - Structs and Unions
  * API: FFI (defineStruct, structNew, fieldPtr, fieldOffset, structSize, defineUnion, unionNew, unionSize)
  */
-load "../lib.ring"
+load "cffi.ring"
 
 oFFI = new FFI("libc.so.6")
 

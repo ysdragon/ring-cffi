@@ -2,7 +2,7 @@
  * Example 06: Symbol Resolution (C API)
  * API: cffi_sym
  */
-load "../lib.ring"
+load "cffi.ring"
 
 pLib = cffi_load("libc.so.6")
 

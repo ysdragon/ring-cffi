@@ -2,7 +2,7 @@
  * Example 20: OOP - Pointer Operations
  * API: FFI (offset, deref, ptrGet, ptrSet)
  */
-load "../lib.ring"
+load "cffi.ring"
 
 oFFI = new FFI("libc.so.6")
 
