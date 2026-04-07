@@ -7,13 +7,23 @@ on:
     - '**.c'
     - '**.h'
     - '**/CMakeLists.txt'
-    - '.github/workflows/**'
+    - '.github/workflows/alpine_build.yml'
+    - '.github/workflows/freebsd_build.yml'
+    - '.github/workflows/macos_build.yml'
+    - '.github/workflows/ubuntu_build.yml'
+    - '.github/workflows/windows_build.yml'
+    - '.github/workflows/main.yml'
   pull_request:
     paths:
     - '**.c'
     - '**.h'
     - '**/CMakeLists.txt'
-    - '.github/workflows/**'
+    - '.github/workflows/alpine_build.yml'
+    - '.github/workflows/freebsd_build.yml'
+    - '.github/workflows/macos_build.yml'
+    - '.github/workflows/ubuntu_build.yml'
+    - '.github/workflows/windows_build.yml'
+    - '.github/workflows/main.yml'
 
 jobs:
   alpine:

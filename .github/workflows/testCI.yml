@@ -2,7 +2,8 @@ name: Test CI
 on:
   push:
     paths:
-      - '**.ring'
+      - 'src/cffi.ring'
+      - 'test/CFFI_test.ring'
       - '.github/workflows/testCI.yml'
   workflow_run:
     workflows: ["Build and Update"]
