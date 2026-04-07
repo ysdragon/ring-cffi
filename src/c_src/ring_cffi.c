@@ -3427,15 +3427,33 @@ RING_FUNC(ring_cffi_varcall)
 			int is_str = aArgs ? ring_list_isstring(aArgs, i + 1) : RING_API_ISSTRING(param_idx);
 			int is_ptr = aArgs ? ring_list_islist(aArgs, i + 1) : RING_API_ISCPOINTER(param_idx);
 
+		/*
+		 * On 64-bit platforms, C variadic promotion always passes integers as 64-bit.
+		 * On 32-bit platforms, integers remain 32-bit.
+		 */
+#ifdef _WIN64
+		#define FFI_VARIADIC_INT_TYPE &ffi_type_sint64
+		#define FFI_VARIADIC_INT_SIZE 8
+#elif defined(_WIN32)
+		#define FFI_VARIADIC_INT_TYPE &ffi_type_sint
+		#define FFI_VARIADIC_INT_SIZE 4
+#elif defined(__LP64__) || defined(__x86_64__) || defined(__aarch64__)
+		#define FFI_VARIADIC_INT_TYPE &ffi_type_sint64
+		#define FFI_VARIADIC_INT_SIZE 8
+#else
+		#define FFI_VARIADIC_INT_TYPE &ffi_type_sint
+		#define FFI_VARIADIC_INT_SIZE 4
+#endif
+
 			if (is_num) {
 				double val =
 					aArgs ? ring_list_getdouble(aArgs, i + 1) : RING_API_GETNUMBER(param_idx);
-				if (val == (int)val && val >= -2147483648 && val <= 2147483647) {
+				if (val == (double)(int)val && val >= -2147483648.0 && val <= 2147483647.0) {
 					if (!(i < fixed_count && func->type->param_types)) {
-						arg_types[i] = &ffi_type_sint;
+						arg_types[i] = FFI_VARIADIC_INT_TYPE;
 					}
-					*(int *)storage_ptr = (int)val;
-					storage_ptr += sizeof(int);
+					*(ffi_sarg *)storage_ptr = (ffi_sarg)(int)val;
+					storage_ptr += FFI_VARIADIC_INT_SIZE;
 				} else {
 					if (!(i < fixed_count && func->type->param_types)) {
 						arg_types[i] = &ffi_type_double;
@@ -3467,10 +3485,10 @@ RING_FUNC(ring_cffi_varcall)
 				storage_ptr += sizeof(void *);
 			} else {
 				if (!(i < fixed_count && func->type->param_types)) {
-					arg_types[i] = &ffi_type_sint;
+					arg_types[i] = FFI_VARIADIC_INT_TYPE;
 				}
-				*(int *)storage_ptr = 0;
-				storage_ptr += sizeof(int);
+				*(ffi_sarg *)storage_ptr = 0;
+				storage_ptr += FFI_VARIADIC_INT_SIZE;
 			}
 		}
 	}
