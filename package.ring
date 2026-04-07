@@ -24,7 +24,6 @@ aPackageInfo = [
 		# Root
 		"lib.ring",
 		"main.ring",
-		"test.ring",
 		"LICENSE",
 		"README.md",
 		"CMakeLists.txt",

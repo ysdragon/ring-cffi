@@ -17,7 +17,7 @@ C_PRETTY_NAME      = "Ring CFFI"
 C_PACKAGE_NAME     = "ring-cffi"
 C_NEW_PACKAGE_NAME = "cffi"
 C_LIB_NAME         = "ring_" + C_NEW_PACKAGE_NAME
-C_SAMPLES_DIR      = "Using" + C_PRETTY_NAME
+C_SAMPLES_DIR      = "Using" + upper(C_NEW_PACKAGE_NAME)
 
 # ============================================================================
 # Main Entry Point
