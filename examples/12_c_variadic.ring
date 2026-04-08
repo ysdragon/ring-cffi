@@ -6,7 +6,7 @@ load "cffi.ring"
 
 pLib = cffi_load(getLibcPath())
 
-oPrintf = cffi_varfunc(pLib, "printf", "int", 1, ["ptr"])
+oPrintf = cffi_varfunc(pLib, "printf", "int", ["ptr"])
 pFmt = cffi_string("Value: %d, Sum: %d\n")
 cffi_varcall(oPrintf, pFmt, 42, 100)
 

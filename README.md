@@ -52,7 +52,7 @@ load "cffi.ring"
 # Load libc and call printf
 ffi = new FFI {
     loadLib("libc.so.6")  # or msvcrt.dll on Windows
-    oPrintf = varFunc("printf", "int", 1, ["string"])
+    oPrintf = varFunc("printf", "int", ["string"])
     varcall(oPrintf, ["Hello from Ring! Value: %d\n", 42])
 }
 ```
@@ -77,7 +77,7 @@ result = ffi.invoke(oSqrt, [25.0])
 ? "sqrt(25) = " + result  # 5.0
 
 # Call printf (variadic function)
-oPrintf = ffi.varFunc("printf", "int", 1, ["string"])
+oPrintf = ffi.varFunc("printf", "int", ["string"])
 ffi.varcall(oPrintf, ["Hello, %s! Number: %d\n", "World", 123])
 ```
 
@@ -257,7 +257,7 @@ ffi = new FFI
 | `library()` | *(none)* | Get the raw library handle |
 | `cFunc(cName, cRetType, [aArgTypes])` | `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Create a C function wrapper |
 | `funcPtr(pPtr, cRetType, [aArgTypes])` | `pPtr`: pointer — function pointer, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Create wrapper from function pointer |
-| `varFunc(cName, cRetType, nFixedCount, [aArgTypes])` | `cName`: string — function name, `cRetType`: string — return type, `nFixedCount`: number — fixed arg count, `aArgTypes`: list (optional) — argument type strings | Create variadic function wrapper |
+| `varFunc(cName, cRetType, [aArgTypes])` | `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — fixed argument type strings (fixed count inferred from list length) | Create variadic function wrapper |
 | `alloc(cType)` | `cType`: string — type name | Allocate memory for a single C type |
 | `allocArray(cType, nCount)` | `cType`: string — type name, `nCount`: number — array element count | Allocate memory for an array of C types |
 | `sizeof(cType)` | `cType`: string — type name | Get size of a C type in bytes |
@@ -324,7 +324,7 @@ These are the underlying native C extension functions exposed to Ring via `RING_
 | `cffi_union(cName, [aFields])` | `cName`: string — union name, `aFields`: list (optional) — field definitions `[["name", "type"], ...]` | Define a C union |
 | `cffi_union_new(pType)` | `pType`: pointer — union definition | Allocate union instance |
 | `cffi_union_size(pType)` | `pType`: pointer — union type | Get union size in bytes |
-| `cffi_varfunc(pLib, cName, cRetType, nFixedCount, [aArgTypes])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `nFixedCount`: number — fixed arg count, `aArgTypes`: list (optional) — argument type strings | Create variadic function wrapper |
+| `cffi_varfunc(pLib, cName, cRetType, [aArgTypes])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — fixed argument type strings (fixed count inferred from list length) | Create variadic function wrapper |
 | `cffi_varcall(oFunc, [aArgs])` | `oFunc`: pointer — variadic function handle, `aArgs`: list (optional) — arguments | Call a variadic function wrapper |
 | `cffi_cdef(pLib, cDeclarations)` | `pLib`: pointer — library handle (can be NULL), `cDeclarations`: string — C definition source | Parse C definition string |
 
@@ -375,11 +375,11 @@ All type aliases recognized by the parser in `parse_type_kind()`:
 
 | Type(s) | Description | Size |
 |---------|-------------|------|
-| `size_t` | Unsigned size type | 8 bytes |
-| `ssize_t` | Signed size type | 8 bytes |
-| `ptrdiff_t` | Pointer difference type | 8 bytes |
-| `intptr_t` | Signed integer pointer type | 8 bytes |
-| `uintptr_t` | Unsigned integer pointer type | 8 bytes |
+| `size_t` | Unsigned size type | platform-dependent |
+| `ssize_t` | Signed size type | platform-dependent |
+| `ptrdiff_t` | Pointer difference type | platform-dependent |
+| `intptr_t` | Signed integer pointer type | platform-dependent |
+| `uintptr_t` | Unsigned integer pointer type | platform-dependent |
 
 #### Other Types
 
