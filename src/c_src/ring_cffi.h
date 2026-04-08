@@ -163,6 +163,7 @@ struct FFI_Function {
 	void *func_ptr;
 	FFI_FuncType *type;
 	ffi_cif cif;
+	ffi_type **ffi_arg_types;
 	bool cif_prepared;
 };
 
@@ -173,6 +174,7 @@ struct FFI_Callback {
 	char *ring_func_name;
 	VM *vm;
 	ffi_cif cif;
+	ffi_type **ffi_arg_types;
 };
 
 /* ============================================================
@@ -198,6 +200,9 @@ struct FFI_Context {
 	HashTable *unions;
 	HashTable *enums;
 
+	/* Parsed type cache (interning) */
+	HashTable *type_cache;
+
 	/* Libraries */
 	List *libraries;
 
@@ -220,7 +225,7 @@ struct FFI_Context {
 #endif
 
 /* Per-VM context storage using Ring's VM API */
-static FFI_TLS FFI_Context *g_ffi_ctx = NULL;
+extern FFI_TLS FFI_Context *g_ffi_ctx;
 
 /* ============================================================
  * Allocated Memory Tracking

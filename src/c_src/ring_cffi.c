@@ -8,6 +8,9 @@
 #include <errno.h>
 #include <stdarg.h>
 
+/* Global context (definition — declared extern in ring_cffi.h) */
+FFI_TLS FFI_Context *g_ffi_ctx = NULL;
+
 static ffi_type *ffi_get_primitive_type(FFI_TypeKind kind)
 {
 	switch (kind) {
@@ -62,15 +65,15 @@ static ffi_type *ffi_get_primitive_type(FFI_TypeKind kind)
 	case FFI_KIND_ULONGLONG:
 		return &ffi_type_uint64;
 	case FFI_KIND_SIZE_T:
-		return &ffi_type_uint64;
+		return (sizeof(size_t) == 8) ? &ffi_type_uint64 : &ffi_type_uint32;
 	case FFI_KIND_SSIZE_T:
-		return &ffi_type_sint64;
+		return (sizeof(size_t) == 8) ? &ffi_type_sint64 : &ffi_type_sint32;
 	case FFI_KIND_PTRDIFF_T:
-		return &ffi_type_sint64;
+		return (sizeof(ptrdiff_t) == 8) ? &ffi_type_sint64 : &ffi_type_sint32;
 	case FFI_KIND_INTPTR_T:
-		return &ffi_type_sint64;
+		return (sizeof(intptr_t) == 8) ? &ffi_type_sint64 : &ffi_type_sint32;
 	case FFI_KIND_UINTPTR_T:
-		return &ffi_type_uint64;
+		return (sizeof(uintptr_t) == 8) ? &ffi_type_uint64 : &ffi_type_uint32;
 	case FFI_KIND_WCHAR_T:
 		if (sizeof(wchar_t) == 2)
 			return &ffi_type_uint16;
@@ -107,12 +110,15 @@ static size_t ffi_get_primitive_size(FFI_TypeKind kind)
 	case FFI_KIND_UINT64:
 	case FFI_KIND_LONGLONG:
 	case FFI_KIND_ULONGLONG:
+		return 8;
 	case FFI_KIND_SIZE_T:
+		return sizeof(size_t);
 	case FFI_KIND_SSIZE_T:
 	case FFI_KIND_PTRDIFF_T:
+		return sizeof(ptrdiff_t);
 	case FFI_KIND_INTPTR_T:
 	case FFI_KIND_UINTPTR_T:
-		return 8;
+		return sizeof(intptr_t);
 	case FFI_KIND_FLOAT:
 		return sizeof(float);
 	case FFI_KIND_DOUBLE:
@@ -145,6 +151,7 @@ FFI_Context *ffi_context_new(RingState *state, VM *vm)
 	ctx->structs = ring_hashtable_new_gc(state);
 	ctx->unions = ring_hashtable_new_gc(state);
 	ctx->enums = ring_hashtable_new_gc(state);
+	ctx->type_cache = ring_hashtable_new_gc(state);
 	ctx->libraries = ring_list_new_gc(state, 0);
 	ctx->callbacks = ring_list_new_gc(state, 0);
 	ctx->allocations = ring_list_new_gc(state, 0);
@@ -419,6 +426,10 @@ void *ffi_alloc_array(FFI_Context *ctx, FFI_Type *type, size_t count)
 		elem_size = sizeof(void *);
 
 	size_t total = elem_size * count;
+	if (count != 0 && total / count != elem_size) {
+		ffi_set_error(ctx, "Integer overflow in array allocation");
+		return NULL;
+	}
 	void *ptr = ring_state_calloc(ctx->ring_state, count, elem_size);
 	if (!ptr) {
 		ffi_set_error(ctx, "Out of memory allocating array of %zu elements", count);
@@ -488,6 +499,7 @@ static double ffi_read_value(void *src, FFI_Type *type)
 	case FFI_KIND_LONGLONG:
 	case FFI_KIND_SSIZE_T:
 	case FFI_KIND_INTPTR_T:
+	case FFI_KIND_PTRDIFF_T:
 		return (double)*(int64_t *)src;
 	case FFI_KIND_UINT64:
 	case FFI_KIND_ULONGLONG:
@@ -542,6 +554,7 @@ static void ffi_write_value(void *dst, FFI_Type *type, double val)
 	case FFI_KIND_LONGLONG:
 	case FFI_KIND_SSIZE_T:
 	case FFI_KIND_INTPTR_T:
+	case FFI_KIND_PTRDIFF_T:
 		*(int64_t *)dst = (int64_t)val;
 		break;
 	case FFI_KIND_UINT64:
@@ -588,24 +601,20 @@ static void ffi_gc_free_ptr(void *state, void *ptr)
 		return;
 
 	FFI_Context *ctx = g_ffi_ctx;
-	if (ctx && ptr) {
+	if (ctx) {
 		for (unsigned int i = 1; i <= ring_list_getsize(ctx->allocations); i++) {
 			FFI_Allocation *alloc = (FFI_Allocation *)ring_list_getpointer(ctx->allocations, i);
 			if (alloc && alloc->ptr == ptr) {
 				FFI_Context *alloc_ctx = alloc->ctx;
-				if (alloc_ctx) {
-					ring_state_free(alloc_ctx->ring_state, alloc->ptr);
-					ring_state_free(alloc_ctx->ring_state, alloc);
-					ring_list_deleteitem_gc(alloc_ctx->ring_state, alloc_ctx->allocations, i);
-					return;
-				}
-				break;
+				RingState *rs = alloc_ctx ? alloc_ctx->ring_state : (RingState *)state;
+				ring_state_free(rs, alloc->ptr);
+				ring_state_free(rs, alloc);
+				ring_list_deleteitem_gc(rs, ctx->allocations, i);
+				return;
 			}
 		}
-		ring_state_free((RingState *)state, ptr);
-	} else if (ptr) {
-		ring_state_free((RingState *)state, ptr);
 	}
+	ring_state_free((RingState *)state, ptr);
 }
 
 static void ffi_gc_free_lib(void *state, void *ptr)
@@ -614,6 +623,83 @@ static void ffi_gc_free_lib(void *state, void *ptr)
 	FFI_Library *lib = (FFI_Library *)ptr;
 	if (lib)
 		ffi_library_close(lib);
+}
+
+static void ffi_gc_free_func(void *state, void *ptr)
+{
+	FFI_Function *func = (FFI_Function *)ptr;
+	if (!func)
+		return;
+	if (func->type) {
+		if (func->type->param_types)
+			ring_state_free((RingState *)state, func->type->param_types);
+		ring_state_free((RingState *)state, func->type);
+	}
+	if (func->ffi_arg_types)
+		ring_state_free((RingState *)state, func->ffi_arg_types);
+	ring_state_free((RingState *)state, func);
+}
+
+static void ffi_gc_free_callback(void *state, void *ptr)
+{
+	if (!ptr)
+		return;
+
+	/*
+	 * ptr is cb->code_ptr (the callable function pointer), not the
+	 * FFI_Callback struct itself. We need to find the struct by
+	 * searching the context's callback list.
+	 */
+	FFI_Context *ctx = g_ffi_ctx;
+	if (!ctx)
+		return;
+
+	for (unsigned int i = 1; i <= ring_list_getsize(ctx->callbacks); i++) {
+		FFI_Callback *cb = (FFI_Callback *)ring_list_getpointer(ctx->callbacks, i);
+		if (cb && cb->code_ptr == ptr) {
+			if (cb->closure)
+				ffi_closure_free(cb->closure);
+			if (cb->type) {
+				if (cb->type->param_types)
+					ring_state_free((RingState *)state, cb->type->param_types);
+				ring_state_free((RingState *)state, cb->type);
+			}
+			if (cb->ffi_arg_types)
+				ring_state_free((RingState *)state, cb->ffi_arg_types);
+			if (cb->ring_func_name)
+				ring_state_free((RingState *)state, cb->ring_func_name);
+			ring_state_free((RingState *)state, cb);
+			ring_list_deleteitem_gc((RingState *)state, ctx->callbacks, i);
+			return;
+		}
+	}
+}
+
+static void ffi_gc_free_type(void *state, void *ptr)
+{
+	FFI_Type *type = (FFI_Type *)ptr;
+	if (!type)
+		return;
+	/* Don't free sub-structures (struct_type, etc.) as they may be shared */
+	ring_state_free((RingState *)state, type);
+}
+
+static void ffi_gc_free_enum(void *state, void *ptr)
+{
+	FFI_EnumType *et = (FFI_EnumType *)ptr;
+	if (!et)
+		return;
+	FFI_EnumConst *ec = et->constants;
+	while (ec) {
+		FFI_EnumConst *next = ec->next;
+		if (ec->name)
+			ring_state_free((RingState *)state, ec->name);
+		ring_state_free((RingState *)state, ec);
+		ec = next;
+	}
+	if (et->name)
+		ring_state_free((RingState *)state, et->name);
+	ring_state_free((RingState *)state, et);
 }
 
 static FFI_Context *get_or_create_context(void *pPointer)
@@ -641,7 +727,7 @@ RING_FUNC(ring_cffi_load)
 		return;
 	}
 
-	ring_vm_api_retcpointer2((VM *)pPointer, lib, "FFI_Library", ffi_gc_free_lib);
+	RING_API_RETMANAGEDCPOINTER(lib, "FFI_Library", ffi_gc_free_lib);
 }
 
 RING_FUNC(ring_cffi_sizeof)
@@ -696,7 +782,7 @@ RING_FUNC(ring_cffi_new)
 		return;
 	}
 
-	ring_vm_api_retcpointer2((VM *)pPointer, ptr, "FFI_Ptr", ffi_gc_free_ptr);
+	RING_API_RETMANAGEDCPOINTER(ptr, "FFI_Ptr", ffi_gc_free_ptr);
 }
 
 RING_FUNC(ring_cffi_nullptr) { RING_API_RETCPOINTER(NULL, "FFI_Ptr"); }
@@ -739,7 +825,7 @@ RING_FUNC(ring_cffi_string)
 		return;
 	}
 
-	ring_vm_api_retcpointer2((VM *)pPointer, copy, "FFI_String", ffi_gc_free_ptr);
+	RING_API_RETMANAGEDCPOINTER(copy, "FFI_String", ffi_gc_free_ptr);
 }
 
 RING_FUNC(ring_cffi_tostring)
@@ -862,6 +948,15 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 	if (!ctx || !type_str)
 		return NULL;
 
+	/* Check the type cache first */
+	if (ctx->type_cache) {
+		FFI_Type *cached =
+			(FFI_Type *)ring_hashtable_findpointer(ctx->type_cache, (char *)type_str);
+		if (cached != NULL) {
+			return cached;
+		}
+	}
+
 	char buf[1024];
 	strncpy(buf, type_str, sizeof(buf) - 1);
 	buf[sizeof(buf) - 1] = '\0';
@@ -871,10 +966,12 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 		p++;
 
 	while (strncmp(p, "const", 5) == 0 || strncmp(p, "volatile", 8) == 0) {
-		if (strncmp(p, "const", 5) == 0)
+		if (strncmp(p, "const", 5) == 0 && !isalnum(p[5]) && p[5] != '_')
 			p += 5;
-		else
+		else if (strncmp(p, "volatile", 8) == 0 && !isalnum(p[8]) && p[8] != '_')
 			p += 8;
+		else
+			break;
 		while (*p && isspace(*p))
 			p++;
 	}
@@ -900,15 +997,21 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 	}
 	FFI_Type *base = ffi_type_primitive(ctx, kind);
 
+	FFI_Type *result = base;
 	if (ptr_count > 0) {
 		FFI_Type *ptr_type = base;
 		for (int i = 0; i < ptr_count; i++) {
 			ptr_type = ffi_type_ptr(ctx, ptr_type);
 		}
-		return ptr_type;
+		result = ptr_type;
 	}
 
-	return base;
+	/* Store in cache */
+	if (ctx->type_cache && result) {
+		ring_hashtable_newpointer_gc(ctx->ring_state, ctx->type_cache, type_str, result);
+	}
+
+	return result;
 }
 
 static FFI_Function *ffi_function_create(FFI_Context *ctx, FFI_Library *lib, const char *name,
@@ -940,10 +1043,13 @@ static FFI_Function *ffi_function_create(FFI_Context *ctx, FFI_Library *lib, con
 	if (param_count > 0) {
 		ftype->param_types =
 			(FFI_Type **)ring_state_malloc(ctx->ring_state, sizeof(FFI_Type *) * param_count);
-		if (ftype->param_types) {
-			for (int i = 0; i < param_count; i++) {
-				ftype->param_types[i] = param_types[i];
-			}
+		if (!ftype->param_types) {
+			ring_state_free(ctx->ring_state, ftype);
+			ring_state_free(ctx->ring_state, func);
+			return NULL;
+		}
+		for (int i = 0; i < param_count; i++) {
+			ftype->param_types[i] = param_types[i];
 		}
 	}
 	func->type = ftype;
@@ -952,6 +1058,13 @@ static FFI_Function *ffi_function_create(FFI_Context *ctx, FFI_Library *lib, con
 	if (param_count > 0) {
 		arg_types =
 			(ffi_type **)ring_state_malloc(ctx->ring_state, sizeof(ffi_type *) * param_count);
+		if (!arg_types) {
+			if (ftype->param_types)
+				ring_state_free(ctx->ring_state, ftype->param_types);
+			ring_state_free(ctx->ring_state, ftype);
+			ring_state_free(ctx->ring_state, func);
+			return NULL;
+		}
 		for (int i = 0; i < param_count; i++) {
 			arg_types[i] = param_types[i]->ffi_type_ptr;
 		}
@@ -970,6 +1083,7 @@ static FFI_Function *ffi_function_create(FFI_Context *ctx, FFI_Library *lib, con
 		return NULL;
 	}
 	func->cif_prepared = true;
+	func->ffi_arg_types = arg_types;
 
 	return func;
 }
@@ -984,7 +1098,7 @@ static FFI_Type **parse_type_list(FFI_Context *ctx, List *type_list, int *out_co
 
 	FFI_Type **types = (FFI_Type **)ring_state_malloc(ctx->ring_state, sizeof(FFI_Type *) * count);
 	if (!types) {
-		*out_count = 0;
+		*out_count = -1;
 		return NULL;
 	}
 
@@ -1046,7 +1160,7 @@ RING_FUNC(ring_cffi_func)
 	if (RING_API_PARACOUNT >= 4 && RING_API_ISLIST(4)) {
 		List *argTypes = RING_API_GETLIST(4);
 		param_types = parse_type_list(ctx, argTypes, &param_count);
-		if (!param_types && param_count == 0) {
+		if (!param_types && param_count < 0) {
 			RING_API_ERROR("ffi_func: parameter types must be valid strings");
 			return;
 		}
@@ -1061,7 +1175,10 @@ RING_FUNC(ring_cffi_func)
 		return;
 	}
 
-	RING_API_RETCPOINTER(func, "FFI_Function");
+	if (param_types)
+		ring_state_free(ctx->ring_state, param_types);
+
+	RING_API_RETMANAGEDCPOINTER(func, "FFI_Function", ffi_gc_free_func);
 }
 
 RING_FUNC(ring_cffi_funcptr)
@@ -1128,7 +1245,7 @@ RING_FUNC(ring_cffi_funcptr)
 	if (RING_API_PARACOUNT >= type_start_param && RING_API_ISLIST(type_start_param)) {
 		List *argTypes = RING_API_GETLIST(type_start_param);
 		param_types = parse_type_list(ctx, argTypes, &param_count);
-		if (!param_types && param_count == 0) {
+		if (!param_types && param_count < 0) {
 			RING_API_ERROR("ffi_funcptr: parameter types must be valid strings");
 			return;
 		}
@@ -1160,10 +1277,16 @@ RING_FUNC(ring_cffi_funcptr)
 	if (param_count > 0 && param_types) {
 		ftype->param_types =
 			(FFI_Type **)ring_state_malloc(ctx->ring_state, sizeof(FFI_Type *) * param_count);
-		if (ftype->param_types) {
-			for (int i = 0; i < param_count; i++) {
-				ftype->param_types[i] = param_types[i];
-			}
+		if (!ftype->param_types) {
+			ring_state_free(ctx->ring_state, ftype);
+			ring_state_free(ctx->ring_state, func);
+			if (param_types)
+				ring_state_free(ctx->ring_state, param_types);
+			RING_API_ERROR("ffi_funcptr: memory allocation failed");
+			return;
+		}
+		for (int i = 0; i < param_count; i++) {
+			ftype->param_types[i] = param_types[i];
 		}
 	}
 	func->type = ftype;
@@ -1172,6 +1295,16 @@ RING_FUNC(ring_cffi_funcptr)
 	if (param_count > 0 && param_types) {
 		arg_types =
 			(ffi_type **)ring_state_malloc(ctx->ring_state, sizeof(ffi_type *) * param_count);
+		if (!arg_types) {
+			if (ftype->param_types)
+				ring_state_free(ctx->ring_state, ftype->param_types);
+			ring_state_free(ctx->ring_state, ftype);
+			ring_state_free(ctx->ring_state, func);
+			if (param_types)
+				ring_state_free(ctx->ring_state, param_types);
+			RING_API_ERROR("ffi_funcptr: memory allocation failed");
+			return;
+		}
 		for (int i = 0; i < param_count; i++) {
 			arg_types[i] = param_types[i]->ffi_type_ptr;
 		}
@@ -1192,11 +1325,12 @@ RING_FUNC(ring_cffi_funcptr)
 		return;
 	}
 	func->cif_prepared = true;
+	func->ffi_arg_types = arg_types;
 
 	if (param_types)
 		ring_state_free(ctx->ring_state, param_types);
 
-	RING_API_RETCPOINTER(func, "FFI_Function");
+	RING_API_RETMANAGEDCPOINTER(func, "FFI_Function", ffi_gc_free_func);
 }
 
 RING_FUNC(ring_cffi_invoke)
@@ -1244,7 +1378,14 @@ RING_FUNC(ring_cffi_invoke)
 	if (arg_count > 0) {
 		size_t storage_size = 0;
 		for (int i = 0; i < arg_count; i++) {
-			storage_size += func->type->param_types[i]->size + sizeof(void *);
+			FFI_Type *ptype = func->type->param_types[i];
+			storage_size = FFI_ALIGN(storage_size, ptype->alignment > 0 ? ptype->alignment : 1);
+			if (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0) {
+				storage_size += sizeof(void *);
+				storage_size = FFI_ALIGN(storage_size, 16);
+			} else {
+				storage_size += ptype->size > 0 ? ptype->size : sizeof(int);
+			}
 		}
 		storage_size = FFI_ALIGN(storage_size, 16);
 
@@ -1341,6 +1482,7 @@ RING_FUNC(ring_cffi_invoke)
 				case FFI_KIND_LONGLONG:
 				case FFI_KIND_SSIZE_T:
 				case FFI_KIND_INTPTR_T:
+				case FFI_KIND_PTRDIFF_T:
 					*(int64_t *)storage_ptr = (int64_t)val;
 					storage_ptr += sizeof(int64_t);
 					break;
@@ -1460,6 +1602,7 @@ RING_FUNC(ring_cffi_invoke)
 		case FFI_KIND_LONGLONG:
 		case FFI_KIND_SSIZE_T:
 		case FFI_KIND_INTPTR_T:
+		case FFI_KIND_PTRDIFF_T:
 		case FFI_KIND_LONG:
 			RING_API_RETNUMBER((double)result.i64);
 			break;
@@ -1723,7 +1866,7 @@ RING_FUNC(ring_cffi_struct)
 	type->size = st->size;
 	type->alignment = st->alignment;
 
-	RING_API_RETCPOINTER(type, "FFI_Type");
+	RING_API_RETMANAGEDCPOINTER(type, "FFI_Type", ffi_gc_free_type);
 }
 
 RING_FUNC(ring_cffi_typeof)
@@ -1749,7 +1892,7 @@ RING_FUNC(ring_cffi_typeof)
 		type->ffi_type_ptr = &st->ffi_type_def;
 		type->size = st->size;
 		type->alignment = st->alignment;
-		RING_API_RETCPOINTER(type, "FFI_Type");
+		RING_API_RETMANAGEDCPOINTER(type, "FFI_Type", ffi_gc_free_type);
 		return;
 	}
 
@@ -1765,7 +1908,7 @@ RING_FUNC(ring_cffi_typeof)
 		type->info.union_type = ut;
 		type->size = ut->size;
 		type->alignment = ut->alignment;
-		RING_API_RETCPOINTER(type, "FFI_Type");
+		RING_API_RETMANAGEDCPOINTER(type, "FFI_Type", ffi_gc_free_type);
 		return;
 	}
 
@@ -1781,7 +1924,7 @@ RING_FUNC(ring_cffi_typeof)
 		type->info.enum_type = et;
 		type->size = sizeof(int);
 		type->alignment = sizeof(int);
-		RING_API_RETCPOINTER(type, "FFI_Type");
+		RING_API_RETMANAGEDCPOINTER(type, "FFI_Type", ffi_gc_free_type);
 		return;
 	}
 
@@ -1821,7 +1964,7 @@ RING_FUNC(ring_cffi_struct_new)
 		return;
 	}
 
-	ring_vm_api_retcpointer2((VM *)pPointer, ptr, "FFI_Struct", ffi_gc_free_ptr);
+	RING_API_RETMANAGEDCPOINTER(ptr, "FFI_Struct", ffi_gc_free_ptr);
 }
 
 RING_FUNC(ring_cffi_field)
@@ -1939,17 +2082,23 @@ static void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *use
 
 	if (ftype->return_type->kind != FFI_KIND_VOID) {
 		n = snprintf(p, rem, "__cb_result = ");
+		if (n < 0 || (size_t)n >= rem)
+			return;
 		p += n;
 		rem -= n;
 	}
 
 	n = snprintf(p, rem, "%s(", cb->ring_func_name);
+	if (n < 0 || (size_t)n >= rem)
+		return;
 	p += n;
 	rem -= n;
 
 	for (int i = 0; i < cif->nargs; i++) {
 		if (i > 0) {
 			n = snprintf(p, rem, ", ");
+			if (n < 0 || (size_t)n >= rem)
+				return;
 			p += n;
 			rem -= n;
 		}
@@ -2040,6 +2189,8 @@ static void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *use
 		}
 
 		n = snprintf(p, rem, "%s", var_name);
+		if (n < 0 || (size_t)n >= rem)
+			return;
 		p += n;
 		rem -= n;
 	}
@@ -2099,6 +2250,7 @@ static void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *use
 				case FFI_KIND_LONGLONG:
 				case FFI_KIND_SSIZE_T:
 				case FFI_KIND_INTPTR_T:
+				case FFI_KIND_PTRDIFF_T:
 					*(int64_t *)ret = (int64_t)val;
 					break;
 				case FFI_KIND_UINT64:
@@ -2161,7 +2313,7 @@ RING_FUNC(ring_cffi_callback)
 	if (RING_API_PARACOUNT >= 3 && RING_API_ISLIST(3)) {
 		List *argTypes = RING_API_GETLIST(3);
 		param_types = parse_type_list(ctx, argTypes, &param_count);
-		if (!param_types && param_count == 0) {
+		if (!param_types && param_count < 0) {
 			RING_API_ERROR("ffi_callback: parameter types must be valid strings");
 			return;
 		}
@@ -2176,6 +2328,10 @@ RING_FUNC(ring_cffi_callback)
 
 	FFI_Callback *cb = (FFI_Callback *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Callback));
 	if (!cb) {
+		if (arg_types)
+			ring_state_free(ctx->ring_state, arg_types);
+		if (param_types)
+			ring_state_free(ctx->ring_state, param_types);
 		RING_API_ERROR("ffi_callback: out of memory");
 		return;
 	}
@@ -2189,6 +2345,13 @@ RING_FUNC(ring_cffi_callback)
 
 	FFI_FuncType *ftype = (FFI_FuncType *)ring_state_malloc(ctx->ring_state, sizeof(FFI_FuncType));
 	if (!ftype) {
+		if (cb->ring_func_name)
+			ring_state_free(ctx->ring_state, cb->ring_func_name);
+		ring_state_free(ctx->ring_state, cb);
+		if (arg_types)
+			ring_state_free(ctx->ring_state, arg_types);
+		if (param_types)
+			ring_state_free(ctx->ring_state, param_types);
 		RING_API_ERROR("ffi_callback: out of memory");
 		return;
 	}
@@ -2200,6 +2363,14 @@ RING_FUNC(ring_cffi_callback)
 
 	cb->closure = ffi_closure_alloc(sizeof(ffi_closure), &cb->code_ptr);
 	if (!cb->closure) {
+		ring_state_free(ctx->ring_state, ftype);
+		if (cb->ring_func_name)
+			ring_state_free(ctx->ring_state, cb->ring_func_name);
+		ring_state_free(ctx->ring_state, cb);
+		if (arg_types)
+			ring_state_free(ctx->ring_state, arg_types);
+		if (param_types)
+			ring_state_free(ctx->ring_state, param_types);
 		RING_API_ERROR("ffi_callback: failed to allocate closure");
 		return;
 	}
@@ -2208,7 +2379,14 @@ RING_FUNC(ring_cffi_callback)
 		ffi_prep_cif(&cb->cif, FFI_DEFAULT_ABI, param_count, ret_type->ffi_type_ptr, arg_types);
 	if (status != FFI_OK) {
 		ffi_closure_free(cb->closure);
-		ring_state_free(ctx->ring_state, arg_types);
+		ring_state_free(ctx->ring_state, ftype);
+		if (cb->ring_func_name)
+			ring_state_free(ctx->ring_state, cb->ring_func_name);
+		ring_state_free(ctx->ring_state, cb);
+		if (arg_types)
+			ring_state_free(ctx->ring_state, arg_types);
+		if (param_types)
+			ring_state_free(ctx->ring_state, param_types);
 		RING_API_ERROR("ffi_callback: failed to prepare cif");
 		return;
 	}
@@ -2216,14 +2394,23 @@ RING_FUNC(ring_cffi_callback)
 	status = ffi_prep_closure_loc(cb->closure, &cb->cif, ffi_callback_handler, cb, cb->code_ptr);
 	if (status != FFI_OK) {
 		ffi_closure_free(cb->closure);
-		ring_state_free(ctx->ring_state, arg_types);
+		ring_state_free(ctx->ring_state, ftype);
+		if (cb->ring_func_name)
+			ring_state_free(ctx->ring_state, cb->ring_func_name);
+		ring_state_free(ctx->ring_state, cb);
+		if (arg_types)
+			ring_state_free(ctx->ring_state, arg_types);
+		if (param_types)
+			ring_state_free(ctx->ring_state, param_types);
 		RING_API_ERROR("ffi_callback: failed to prepare closure");
 		return;
 	}
 
+	cb->ffi_arg_types = arg_types;
+
 	ring_list_addpointer_gc(ctx->ring_state, ctx->callbacks, cb);
 
-	RING_API_RETCPOINTER(cb->code_ptr, "FFI_Callback");
+	RING_API_RETMANAGEDCPOINTER(cb->code_ptr, "FFI_Callback", ffi_gc_free_callback);
 }
 
 RING_FUNC(ring_cffi_enum)
@@ -2294,7 +2481,7 @@ RING_FUNC(ring_cffi_enum)
 
 	ring_hashtable_newpointer_gc(ctx->ring_state, ctx->enums, name, et);
 
-	RING_API_RETCPOINTER(et, "FFI_Enum");
+	RING_API_RETMANAGEDCPOINTER(et, "FFI_Enum", ffi_gc_free_enum);
 }
 
 RING_FUNC(ring_cffi_enum_value)
@@ -2433,7 +2620,7 @@ RING_FUNC(ring_cffi_union)
 	type->size = ut->size;
 	type->alignment = ut->alignment;
 
-	RING_API_RETCPOINTER(type, "FFI_Type");
+	RING_API_RETMANAGEDCPOINTER(type, "FFI_Type", ffi_gc_free_type);
 }
 
 RING_FUNC(ring_cffi_union_new)
@@ -2458,7 +2645,7 @@ RING_FUNC(ring_cffi_union_new)
 		return;
 	}
 
-	ring_vm_api_retcpointer2((VM *)pPointer, ptr, "FFI_Union", ffi_gc_free_ptr);
+	RING_API_RETMANAGEDCPOINTER(ptr, "FFI_Union", ffi_gc_free_ptr);
 }
 
 RING_FUNC(ring_cffi_union_size)
@@ -2492,7 +2679,8 @@ static void cparser_init(CParser *p, FFI_Context *ctx, FFI_Library *lib, const c
 	p->ctx = ctx;
 	p->lib = lib;
 	p->src = ring_state_malloc(ctx->ring_state, strlen(src) + 1);
-	strcpy(p->src, src);
+	if (p->src)
+		strcpy(p->src, src);
 	p->pos = p->src;
 	p->error[0] = '\0';
 	p->result_list = ring_list_new_gc(ctx->ring_state, 0);
@@ -2777,7 +2965,8 @@ static bool cparser_parse_struct(CParser *p, bool is_union)
 				(FFI_UnionType *)ring_state_malloc(p->ctx->ring_state, sizeof(FFI_UnionType));
 			memset(ut, 0, sizeof(FFI_UnionType));
 			ut->name = ring_state_malloc(p->ctx->ring_state, strlen(name) + 1);
-			strcpy(ut->name, name);
+			if (ut->name)
+				strcpy(ut->name, name);
 
 			int fcount = ring_list_getsize(fields);
 			for (int i = 1; i <= fcount; i++) {
@@ -2863,7 +3052,8 @@ static bool cparser_parse_enum(CParser *p)
 			(FFI_EnumType *)ring_state_malloc(p->ctx->ring_state, sizeof(FFI_EnumType));
 		memset(et, 0, sizeof(FFI_EnumType));
 		et->name = ring_state_malloc(p->ctx->ring_state, strlen(name) + 1);
-		strcpy(et->name, name);
+		if (et->name)
+			strcpy(et->name, name);
 
 		int ccount = ring_list_getsize(consts);
 		for (int i = 1; i <= ccount; i++) {
@@ -2875,7 +3065,8 @@ static bool cparser_parse_enum(CParser *p)
 				(FFI_EnumConst *)ring_state_malloc(p->ctx->ring_state, sizeof(FFI_EnumConst));
 			memset(ec, 0, sizeof(FFI_EnumConst));
 			ec->name = ring_state_malloc(p->ctx->ring_state, strlen(cname) + 1);
-			strcpy(ec->name, cname);
+			if (ec->name)
+				strcpy(ec->name, cname);
 			ec->value = cval;
 
 			if (!et->constants) {
@@ -3013,8 +3204,11 @@ static bool cparser_parse_function(CParser *p)
 	}
 
 	char func_name[128];
-	if (!cparser_ident(p, func_name, sizeof(func_name)))
+	if (!cparser_ident(p, func_name, sizeof(func_name))) {
+		/* If the identifier from the function pointer typedef block
+		 * was already consumed, reuse alias as func_name */
 		return false;
+	}
 
 	cparser_skip_ws(p);
 	if (*p->pos != '(')
@@ -3317,7 +3511,7 @@ RING_FUNC(ring_cffi_varfunc)
 	if (RING_API_PARACOUNT >= 5 && RING_API_ISLIST(5)) {
 		List *argTypes = RING_API_GETLIST(5);
 		param_types = parse_type_list(ctx, argTypes, &param_count);
-		if (!param_types && param_count == 0) {
+		if (!param_types && param_count < 0) {
 			RING_API_ERROR("ffi_varfunc: parameter types must be valid strings");
 			return;
 		}
@@ -3325,6 +3519,8 @@ RING_FUNC(ring_cffi_varfunc)
 
 	FFI_Function *func = (FFI_Function *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Function));
 	if (!func) {
+		if (param_types)
+			ring_state_free(ctx->ring_state, param_types);
 		RING_API_ERROR("ffi_varfunc: out of memory");
 		return;
 	}
@@ -3334,6 +3530,9 @@ RING_FUNC(ring_cffi_varfunc)
 
 	FFI_FuncType *ftype = (FFI_FuncType *)ring_state_malloc(ctx->ring_state, sizeof(FFI_FuncType));
 	if (!ftype) {
+		ring_state_free(ctx->ring_state, func);
+		if (param_types)
+			ring_state_free(ctx->ring_state, param_types);
 		RING_API_ERROR("ffi_varfunc: out of memory");
 		return;
 	}
@@ -3345,7 +3544,7 @@ RING_FUNC(ring_cffi_varfunc)
 	func->type = ftype;
 	func->cif_prepared = false;
 
-	RING_API_RETCPOINTER(func, "FFI_VarFunction");
+	RING_API_RETMANAGEDCPOINTER(func, "FFI_VarFunction", ffi_gc_free_func);
 }
 
 RING_FUNC(ring_cffi_varcall)
@@ -3397,6 +3596,12 @@ RING_FUNC(ring_cffi_varcall)
 			ring_state_calloc(ctx->ring_state, total_args, sizeof(double) + sizeof(void *));
 
 		if (!arg_types || !arg_values || !arg_storage) {
+			if (arg_types)
+				ring_state_free(ctx->ring_state, arg_types);
+			if (arg_values)
+				ring_state_free(ctx->ring_state, arg_values);
+			if (arg_storage)
+				ring_state_free(ctx->ring_state, arg_storage);
 			RING_API_ERROR("ffi_varcall: out of memory");
 			return;
 		}
@@ -3427,22 +3632,22 @@ RING_FUNC(ring_cffi_varcall)
 			int is_str = aArgs ? ring_list_isstring(aArgs, i + 1) : RING_API_ISSTRING(param_idx);
 			int is_ptr = aArgs ? ring_list_islist(aArgs, i + 1) : RING_API_ISCPOINTER(param_idx);
 
-		/*
-		 * On 64-bit platforms, C variadic promotion always passes integers as 64-bit.
-		 * On 32-bit platforms, integers remain 32-bit.
-		 */
+			/*
+			 * On 64-bit platforms, C variadic promotion always passes integers as 64-bit.
+			 * On 32-bit platforms, integers remain 32-bit.
+			 */
 #ifdef _WIN64
-		#define FFI_VARIADIC_INT_TYPE &ffi_type_sint64
-		#define FFI_VARIADIC_INT_SIZE 8
+#define FFI_VARIADIC_INT_TYPE &ffi_type_sint64
+#define FFI_VARIADIC_INT_SIZE 8
 #elif defined(_WIN32)
-		#define FFI_VARIADIC_INT_TYPE &ffi_type_sint
-		#define FFI_VARIADIC_INT_SIZE 4
+#define FFI_VARIADIC_INT_TYPE &ffi_type_sint
+#define FFI_VARIADIC_INT_SIZE 4
 #elif defined(__LP64__) || defined(__x86_64__) || defined(__aarch64__)
-		#define FFI_VARIADIC_INT_TYPE &ffi_type_sint64
-		#define FFI_VARIADIC_INT_SIZE 8
+#define FFI_VARIADIC_INT_TYPE &ffi_type_sint64
+#define FFI_VARIADIC_INT_SIZE 8
 #else
-		#define FFI_VARIADIC_INT_TYPE &ffi_type_sint
-		#define FFI_VARIADIC_INT_SIZE 4
+#define FFI_VARIADIC_INT_TYPE &ffi_type_sint
+#define FFI_VARIADIC_INT_SIZE 4
 #endif
 
 			if (is_num) {
@@ -3509,8 +3714,17 @@ RING_FUNC(ring_cffi_varcall)
 
 	union {
 		ffi_arg u;
-		int i;
+		int8_t i8;
+		uint8_t u8;
+		int16_t i16;
+		uint16_t u16;
+		int32_t i32;
+		uint32_t u32;
+		int64_t i64;
+		uint64_t u64;
+		float f;
 		double d;
+		long double ld;
 		void *p;
 	} result;
 	memset(&result, 0, sizeof(result));
@@ -3529,10 +3743,57 @@ RING_FUNC(ring_cffi_varcall)
 		RING_API_RETNUMBER(0);
 	} else if (rtype->kind == FFI_KIND_POINTER || rtype->pointer_depth > 0) {
 		RING_API_RETCPOINTER(result.p, "FFI_Ptr");
-	} else if (rtype->kind == FFI_KIND_DOUBLE || rtype->kind == FFI_KIND_FLOAT) {
+	} else if (rtype->kind == FFI_KIND_FLOAT) {
+		RING_API_RETNUMBER((double)result.f);
+	} else if (rtype->kind == FFI_KIND_DOUBLE) {
 		RING_API_RETNUMBER(result.d);
 	} else {
-		RING_API_RETNUMBER((double)(int)result.u);
+		switch (rtype->kind) {
+		case FFI_KIND_INT8:
+		case FFI_KIND_SCHAR:
+		case FFI_KIND_CHAR:
+			RING_API_RETNUMBER((double)(int8_t)result.u);
+			break;
+		case FFI_KIND_UINT8:
+		case FFI_KIND_UCHAR:
+		case FFI_KIND_BOOL:
+			RING_API_RETNUMBER((double)(uint8_t)result.u);
+			break;
+		case FFI_KIND_INT16:
+		case FFI_KIND_SHORT:
+			RING_API_RETNUMBER((double)(int16_t)result.u);
+			break;
+		case FFI_KIND_UINT16:
+		case FFI_KIND_USHORT:
+			RING_API_RETNUMBER((double)(uint16_t)result.u);
+			break;
+		case FFI_KIND_INT32:
+		case FFI_KIND_INT:
+			RING_API_RETNUMBER((double)(int32_t)result.u);
+			break;
+		case FFI_KIND_UINT32:
+		case FFI_KIND_UINT:
+			RING_API_RETNUMBER((double)(uint32_t)result.u);
+			break;
+		case FFI_KIND_INT64:
+		case FFI_KIND_LONGLONG:
+		case FFI_KIND_SSIZE_T:
+		case FFI_KIND_INTPTR_T:
+		case FFI_KIND_PTRDIFF_T:
+		case FFI_KIND_LONG:
+			RING_API_RETNUMBER((double)result.i64);
+			break;
+		case FFI_KIND_UINT64:
+		case FFI_KIND_ULONGLONG:
+		case FFI_KIND_SIZE_T:
+		case FFI_KIND_UINTPTR_T:
+		case FFI_KIND_ULONG:
+			RING_API_RETNUMBER((double)result.u64);
+			break;
+		default:
+			RING_API_RETNUMBER((double)(int)result.u);
+			break;
+		}
 	}
 }
 
