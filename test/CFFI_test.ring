@@ -626,7 +626,7 @@ class CFFITest
 	func test_varfunc_sprintf
 		pBuf = cffi_new("char", 128)
 		pFmt = cffi_string("Int: %d, Double: %.2f")
-		oFunc = cffi_varfunc(oFFI.library(), "sprintf", "int", 2, ["ptr", "ptr"])
+		oFunc = cffi_varfunc(oFFI.library(), "sprintf", "int", ["ptr", "ptr"])
 		assertIsPointer(oFunc, "cffi_varfunc should return pointer")
 
 	# ==================== C Definition Parser Tests ====================
@@ -683,7 +683,7 @@ class CFFITest
 	func test_ffi_class_varFunc
 		oTest = new FFI
 		oTest.loadLib(cLibcPath)
-		oFunc = oTest.varFunc("sprintf", "int", 2, ["ptr", "ptr"])
+		oFunc = oTest.varFunc("sprintf", "int", ["ptr", "ptr"])
 		assert(isPointer(oFunc), "varFunc should return function pointer")
 
 	func test_ffi_class_varcall
@@ -691,7 +691,7 @@ class CFFITest
 		oTest.loadLib(cLibcPath)
 		pBuf = oTest.allocArray("char", 64)
 		pFmt = oTest.string("Num: %d")
-		oFunc = oTest.varFunc("sprintf", "int", 2, ["ptr", "ptr"])
+		oFunc = oTest.varFunc("sprintf", "int", ["ptr", "ptr"])
 		assert(isPointer(oFunc), "varFunc should return variadic function pointer")
 		oTest.varcall(oFunc, [pBuf, pFmt, 42])
 		cResult = oTest.toString(pBuf)

@@ -3459,8 +3459,8 @@ RING_FUNC(ring_cffi_cdef)
 RING_FUNC(ring_cffi_varfunc)
 {
 	if (RING_API_PARACOUNT < 3) {
-		RING_API_ERROR("ffi_varfunc(lib, name, rettype, fixed_arg_count, "
-					   "[, argtypes_list]) requires at least 3 parameters");
+		RING_API_ERROR("ffi_varfunc(lib, name, rettype [, argtypes_list]) "
+					   "requires at least 3 parameters");
 		return;
 	}
 
@@ -3470,10 +3470,6 @@ RING_FUNC(ring_cffi_varfunc)
 	}
 	if (!RING_API_ISSTRING(2) || !RING_API_ISSTRING(3)) {
 		RING_API_ERROR("ffi_varfunc: name and return type must be strings");
-		return;
-	}
-	if (RING_API_PARACOUNT >= 4 && !RING_API_ISNUMBER(4)) {
-		RING_API_ERROR("ffi_varfunc: fixed_arg_count must be a number");
 		return;
 	}
 
@@ -3487,10 +3483,6 @@ RING_FUNC(ring_cffi_varfunc)
 
 	const char *func_name = RING_API_GETSTRING(2);
 	const char *ret_type_str = RING_API_GETSTRING(3);
-	int fixed_count = 0;
-	if (RING_API_PARACOUNT >= 4) {
-		fixed_count = (int)RING_API_GETNUMBER(4);
-	}
 
 	void *func_ptr = ffi_library_symbol(lib, func_name);
 	if (!func_ptr) {
@@ -3508,8 +3500,8 @@ RING_FUNC(ring_cffi_varfunc)
 	int param_count = 0;
 	FFI_Type **param_types = NULL;
 
-	if (RING_API_PARACOUNT >= 5 && RING_API_ISLIST(5)) {
-		List *argTypes = RING_API_GETLIST(5);
+	if (RING_API_PARACOUNT >= 4 && RING_API_ISLIST(4)) {
+		List *argTypes = RING_API_GETLIST(4);
 		param_types = parse_type_list(ctx, argTypes, &param_count);
 		if (!param_types && param_count < 0) {
 			RING_API_ERROR("ffi_varfunc: parameter types must be valid strings");
@@ -3539,7 +3531,7 @@ RING_FUNC(ring_cffi_varfunc)
 	memset(ftype, 0, sizeof(FFI_FuncType));
 	ftype->return_type = ret_type;
 	ftype->param_types = param_types;
-	ftype->param_count = fixed_count;
+	ftype->param_count = param_count;
 	ftype->is_variadic = true;
 	func->type = ftype;
 	func->cif_prepared = false;

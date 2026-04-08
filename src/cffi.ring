@@ -108,21 +108,17 @@ class FFI
      * Creates a variadic function wrapper (supports variable arguments).
      * @param cName Name of the C function.
      * @param cRetType Return type.
-     * @param nFixedCount Number of fixed (non-variadic) arguments.
-     * @param aArgTypes Fixed argument type strings.
+     * @param aArgTypes Fixed argument type strings (fixed count inferred from list length).
      * @return FFI_Function object for variadic calls.
      */
-    func varFunc cName, cRetType, nFixedCount, aArgTypes
+    func varFunc cName, cRetType, aArgTypes
         if pLib = NULL
             raise("No library loaded. Call loadLib() first.")
         ok
         if isNull(aArgTypes)
-            return cffi_varfunc(pLib, cName, cRetType, nFixedCount)
+            return cffi_varfunc(pLib, cName, cRetType)
         ok
-        if isList(aArgTypes)
-            return cffi_varfunc(pLib, cName, cRetType, nFixedCount, aArgTypes)
-        ok
-        return cffi_varfunc(pLib, cName, cRetType, nFixedCount, aArgTypes)
+        return cffi_varfunc(pLib, cName, cRetType, aArgTypes)
 
     /*
      * ========================================
