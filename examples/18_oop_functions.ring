@@ -17,7 +17,7 @@ oAtoi = oFFI.funcPtr(pSym, "int", ["ptr"])
 ? "atoi: " + oFFI.invoke(oAtoi, [oFFI.string("12345")])
 
 # varFunc + varcall
-oPrintf = oFFI.varFunc("printf", "int", 1, ["ptr"])
+oPrintf = oFFI.varFunc("printf", "int", ["ptr"])
 oFFI.varcall(oPrintf, [oFFI.string("OOP printf: %d + %d = %d\n"), 10, 20, 30])
 
 func getLibcPath
