@@ -1,6 +1,7 @@
 name: Test CI
 on:
   push:
+    branches: [ master ]
     paths:
       - 'src/cffi.ring'
       - 'test/CFFI_test.ring'
