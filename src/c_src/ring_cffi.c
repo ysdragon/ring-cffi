@@ -2941,12 +2941,12 @@ static bool cparser_parse_struct(CParser *p, bool is_union)
 		if (*p->pos == '\0')
 			break;
 
-		char field_type[128];
+		char field_type[128] = "";
 		cparser_type(p, field_type, sizeof(field_type));
 		if (!field_type[0])
 			break;
 
-		char field_name[128];
+		char field_name[128] = "";
 		cparser_skip_ws(p);
 
 		if (*p->pos == '(') {
