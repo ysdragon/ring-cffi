@@ -187,7 +187,7 @@ struct FFI_Callback {
 struct FFI_Library {
 	char *path;
 	FFI_LibHandle handle;
-	FFI_Context *ctx;
+	RingState *ring_state;
 };
 
 /* ============================================================
@@ -206,11 +206,8 @@ struct FFI_Context {
 	/* Parsed type cache (interning) */
 	HashTable *type_cache;
 
-	/* Libraries */
-	List *libraries;
-
-	/* Callbacks */
-	HashTable *callbacks;
+	/* GC Tracking List */
+	List *gc_list;
 
 	/* Error handling */
 	char error_msg[1024];

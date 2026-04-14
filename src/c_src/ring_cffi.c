@@ -4,9 +4,19 @@
  * Copyright (c) 2026
  */
 
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
+
 #include "ring_cffi.h"
 #include <errno.h>
 #include <stdarg.h>
+
+static void ffi_gc_free_struct_type(void *state, void *ptr);
+static void ffi_gc_free_union_type(void *state, void *ptr);
+static void ffi_gc_free_enum(void *state, void *ptr);
+static void ffi_gc_free_func(void *state, void *ptr);
+static void ffi_gc_free_type(void *state, void *ptr);
 
 #ifdef _WIN32
 FFI_LibHandle FFI_LoadLib_UTF8(const char *path)
@@ -169,8 +179,7 @@ FFI_Context *ffi_context_new(RingState *state, VM *vm)
 	ctx->unions = ring_hashtable_new_gc(state);
 	ctx->enums = ring_hashtable_new_gc(state);
 	ctx->type_cache = ring_hashtable_new_gc(state);
-	ctx->libraries = ring_list_new_gc(state, 0);
-	ctx->callbacks = ring_hashtable_new_gc(state);
+	ctx->gc_list = ring_list_new_gc(state, 0);
 
 	g_ffi_ctx = ctx;
 	return ctx;
@@ -207,26 +216,9 @@ FFI_Library *ffi_library_open(FFI_Context *ctx, const char *path)
 	lib->path = ring_state_malloc(ctx->ring_state, strlen(path) + 1);
 	if (lib->path)
 		strcpy(lib->path, path);
-	lib->ctx = ctx;
+	lib->ring_state = ctx->ring_state;
 
-	ring_list_addpointer_gc(ctx->ring_state, ctx->libraries, lib);
 	return lib;
-}
-
-void ffi_library_close(FFI_Library *lib)
-{
-	if (!lib)
-		return;
-
-	FFI_Context *ctx = lib->ctx;
-	RingState *state = ctx->ring_state;
-
-	if (lib->handle)
-		FFI_CloseLib(lib->handle);
-	if (lib->path)
-		ring_state_free(state, lib->path);
-
-	ring_state_free(state, lib);
 }
 
 void *ffi_library_symbol(FFI_Library *lib, const char *name)
@@ -282,6 +274,8 @@ FFI_StructType *ffi_struct_define(FFI_Context *ctx, const char *name)
 		if (st->name)
 			strcpy(st->name, name);
 	}
+
+	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, st, ffi_gc_free_struct_type);
 
 	return st;
 }
@@ -600,10 +594,21 @@ static void ffi_gc_free_ptr(void *state, void *ptr)
 
 static void ffi_gc_free_lib(void *state, void *ptr)
 {
-	(void)state;
 	FFI_Library *lib = (FFI_Library *)ptr;
-	if (lib)
-		ffi_library_close(lib);
+	if (!lib)
+		return;
+	if (lib->handle)
+		FFI_CloseLib(lib->handle);
+	if (lib->path)
+		ring_state_free((RingState *)state, lib->path);
+	ring_state_free((RingState *)state, lib);
+}
+
+void ffi_library_close(FFI_Library *lib)
+{
+	if (!lib)
+		return;
+	ffi_gc_free_lib(lib->ring_state, lib);
 }
 
 static void ffi_gc_free_func(void *state, void *ptr)
@@ -623,22 +628,21 @@ static void ffi_gc_free_func(void *state, void *ptr)
 
 static void ffi_gc_free_callback(void *state, void *ptr)
 {
-	if (!ptr)
-		return;
-
-	FFI_Context *ctx = g_ffi_ctx;
-	if (!ctx || !ctx->callbacks)
-		return;
-
-	char key[32];
-	snprintf(key, sizeof(key), "%p", ptr);
-
-	FFI_Callback *cb = (FFI_Callback *)ring_hashtable_findpointer(ctx->callbacks, key);
+	FFI_Callback *cb = (FFI_Callback *)ptr;
 	if (!cb)
 		return;
 
 	if (cb->closure)
 		ffi_closure_free(cb->closure);
+
+	if (cb->arg_var_names) {
+		for (int i = 0; i < cb->type->param_count; i++) {
+			if (cb->arg_var_names[i])
+				ring_state_free((RingState *)state, cb->arg_var_names[i]);
+		}
+		ring_state_free((RingState *)state, cb->arg_var_names);
+	}
+
 	if (cb->type) {
 		if (cb->type->param_types)
 			ring_state_free((RingState *)state, cb->type->param_types);
@@ -650,15 +654,7 @@ static void ffi_gc_free_callback(void *state, void *ptr)
 		ring_state_free((RingState *)state, cb->ring_func_name);
 	if (cb->call_buf)
 		ring_state_free((RingState *)state, cb->call_buf);
-	if (cb->arg_var_names) {
-		for (int i = 0; i < cb->type->param_count; i++) {
-			if (cb->arg_var_names[i])
-				ring_state_free((RingState *)state, cb->arg_var_names[i]);
-		}
-		ring_state_free((RingState *)state, cb->arg_var_names);
-	}
 	ring_state_free((RingState *)state, cb);
-	ring_hashtable_deleteitem_gc((RingState *)state, ctx->callbacks, key);
 }
 
 static void ffi_gc_free_type(void *state, void *ptr)
@@ -688,11 +684,88 @@ static void ffi_gc_free_enum(void *state, void *ptr)
 	ring_state_free((RingState *)state, et);
 }
 
+static void ffi_gc_free_struct_type(void *state, void *ptr)
+{
+	FFI_StructType *st = (FFI_StructType *)ptr;
+	if (!st)
+		return;
+	if (st->name)
+		ring_state_free((RingState *)state, st->name);
+	FFI_StructField *field = st->fields;
+	while (field) {
+		FFI_StructField *next = field->next;
+		if (field->name)
+			ring_state_free((RingState *)state, field->name);
+		ring_state_free((RingState *)state, field);
+		field = next;
+	}
+	if (st->ffi_elements)
+		ring_state_free((RingState *)state, st->ffi_elements);
+	ring_state_free((RingState *)state, st);
+}
+
+static void ffi_gc_free_union_type(void *state, void *ptr)
+{
+	FFI_UnionType *ut = (FFI_UnionType *)ptr;
+	if (!ut)
+		return;
+	if (ut->name)
+		ring_state_free((RingState *)state, ut->name);
+	FFI_StructField *field = ut->fields;
+	while (field) {
+		FFI_StructField *next = field->next;
+		if (field->name)
+			ring_state_free((RingState *)state, field->name);
+		ring_state_free((RingState *)state, field);
+		field = next;
+	}
+	ring_state_free((RingState *)state, ut);
+}
+
+static void ffi_context_free(void *state, void *ptr)
+{
+	FFI_Context *ctx = (FFI_Context *)ptr;
+	if (!ctx)
+		return;
+	RingState *pRingState = (RingState *)state;
+
+	if (ctx->structs)
+		ring_hashtable_delete_gc(pRingState, ctx->structs);
+	if (ctx->unions)
+		ring_hashtable_delete_gc(pRingState, ctx->unions);
+	if (ctx->enums)
+		ring_hashtable_delete_gc(pRingState, ctx->enums);
+	if (ctx->type_cache)
+		ring_hashtable_delete_gc(pRingState, ctx->type_cache);
+
+	if (ctx->gc_list)
+		ring_list_delete_gc(pRingState, ctx->gc_list);
+
+	ring_state_free(pRingState, ctx);
+	if (g_ffi_ctx == ctx)
+		g_ffi_ctx = NULL;
+}
+
 static FFI_Context *get_or_create_context(void *pPointer)
 {
 	VM *vm = (VM *)pPointer;
 	if (!g_ffi_ctx || g_ffi_ctx->vm != vm) {
 		g_ffi_ctx = ffi_context_new(vm->pRingState, vm);
+
+		int root_scope_idx = vm->pRingState->lRunFromSubThread ? 2 : 1;
+		List *rootScope = &(vm->aScopes[root_scope_idx]);
+
+		char varName[64];
+		snprintf(varName, sizeof(varName), "__cffi_ctx_%p", (void *)g_ffi_ctx);
+
+		List *pVar = ring_list_newlist_gc(vm->pRingState, rootScope);
+		ring_list_addstring_gc(vm->pRingState, pVar, varName);
+		ring_list_addint_gc(vm->pRingState, pVar, RING_VM_POINTER);
+		ring_list_addpointer_gc(vm->pRingState, pVar, g_ffi_ctx);
+		ring_list_addint_gc(vm->pRingState, pVar, RING_OBJTYPE_NOTYPE);
+
+		Item *pItem = ring_list_getitem_gc(vm->pRingState, pVar, RING_VAR_VALUE);
+		ring_vm_gc_setfreefunc(pItem, ffi_context_free);
 	}
 	return g_ffi_ctx;
 }
@@ -995,6 +1068,7 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 	/* Store in cache */
 	if (ctx->type_cache && result) {
 		ring_hashtable_newpointer_gc(ctx->ring_state, ctx->type_cache, type_str, result);
+		ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, result, ffi_gc_free_type);
 	}
 
 	return result;
@@ -1398,35 +1472,46 @@ RING_FUNC(ring_cffi_invoke)
 			int param_idx = aArgs ? 0 : (2 + i);
 
 			if (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0) {
+				void *ptr_val = NULL;
+				const char *ptr_type = NULL;
 				if (aArgs) {
 					if (ring_list_islist(aArgs, i + 1)) {
 						List *argList = ring_list_getlist(aArgs, i + 1);
-						*(void **)storage_ptr =
-							ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+						ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+						ptr_type = ring_list_getstring(argList, RING_CPOINTER_TYPE);
 					} else if (ring_list_isstring(aArgs, i + 1)) {
-						*(const char **)storage_ptr = ring_list_getstring(aArgs, i + 1);
+						ptr_val = (void *)ring_list_getstring(aArgs, i + 1);
 					} else if (ring_list_isdouble(aArgs, i + 1) &&
 							   ring_list_getdouble(aArgs, i + 1) == 0) {
-						*(void **)storage_ptr = NULL;
+						ptr_val = NULL;
 					} else {
 						RING_API_ERROR("ffi_invoke: expected pointer argument");
 						ring_state_free(ctx->ring_state, arg_storage);
 						ring_state_free(ctx->ring_state, arg_values);
 						return;
 					}
-				} else if (RING_API_ISCPOINTER(param_idx)) {
-					List *argList = RING_API_GETLIST(param_idx);
-					*(void **)storage_ptr = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
-				} else if (RING_API_ISSTRING(param_idx)) {
-					*(const char **)storage_ptr = RING_API_GETSTRING(param_idx);
-				} else if (RING_API_ISNUMBER(param_idx) && RING_API_GETNUMBER(param_idx) == 0) {
-					*(void **)storage_ptr = NULL;
 				} else {
-					RING_API_ERROR("ffi_invoke: expected pointer argument");
-					ring_state_free(ctx->ring_state, arg_storage);
-					ring_state_free(ctx->ring_state, arg_values);
-					return;
+					if (RING_API_ISCPOINTER(param_idx)) {
+						List *argList = RING_API_GETLIST(param_idx);
+						ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+						ptr_type = ring_list_getstring(argList, RING_CPOINTER_TYPE);
+					} else if (RING_API_ISSTRING(param_idx)) {
+						ptr_val = (void *)RING_API_GETSTRING(param_idx);
+					} else if (RING_API_ISNUMBER(param_idx) && RING_API_GETNUMBER(param_idx) == 0) {
+						ptr_val = NULL;
+					} else {
+						RING_API_ERROR("ffi_invoke: expected pointer argument");
+						ring_state_free(ctx->ring_state, arg_storage);
+						ring_state_free(ctx->ring_state, arg_values);
+						return;
+					}
 				}
+
+				if (ptr_type && strcmp(ptr_type, "FFI_Callback") == 0 && ptr_val) {
+					ptr_val = ((FFI_Callback *)ptr_val)->code_ptr;
+				}
+
+				*(void **)storage_ptr = ptr_val;
 				storage_ptr = (char *)FFI_ALIGN((size_t)(storage_ptr + sizeof(void *)), 16);
 			} else if (aArgs ? ring_list_isdouble(aArgs, i + 1) : RING_API_ISNUMBER(param_idx)) {
 				double val =
@@ -2408,11 +2493,7 @@ RING_FUNC(ring_cffi_callback)
 		memcpy(cb->call_buf, tmp_buf, call_len);
 	}
 
-	char key[32];
-	snprintf(key, sizeof(key), "%p", cb->code_ptr);
-	ring_hashtable_newpointer_gc(ctx->ring_state, ctx->callbacks, key, cb);
-
-	RING_API_RETMANAGEDCPOINTER(cb->code_ptr, "FFI_Callback", ffi_gc_free_callback);
+	RING_API_RETMANAGEDCPOINTER(cb, "FFI_Callback", ffi_gc_free_callback);
 }
 
 RING_FUNC(ring_cffi_enum)
@@ -2431,6 +2512,7 @@ RING_FUNC(ring_cffi_enum)
 		return;
 	}
 	memset(et, 0, sizeof(FFI_EnumType));
+	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, et, ffi_gc_free_enum);
 
 	et->name = ring_state_malloc(ctx->ring_state, strlen(name) + 1);
 	if (et->name)
@@ -2483,7 +2565,7 @@ RING_FUNC(ring_cffi_enum)
 
 	ring_hashtable_newpointer_gc(ctx->ring_state, ctx->enums, name, et);
 
-	RING_API_RETMANAGEDCPOINTER(et, "FFI_Enum", ffi_gc_free_enum);
+	RING_API_RETCPOINTER(et, "FFI_Enum");
 }
 
 RING_FUNC(ring_cffi_enum_value)
@@ -2551,6 +2633,7 @@ RING_FUNC(ring_cffi_union)
 		return;
 	}
 	memset(ut, 0, sizeof(FFI_UnionType));
+	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, ut, ffi_gc_free_union_type);
 
 	ut->name = ring_state_malloc(ctx->ring_state, strlen(name) + 1);
 	if (ut->name)
@@ -2684,6 +2767,8 @@ static void cparser_free(CParser *p)
 {
 	if (p->src)
 		ring_state_free(p->ctx->ring_state, p->src);
+	if (p->result_list)
+		ring_list_delete_gc(p->ctx->ring_state, p->result_list);
 }
 
 static void cparser_skip_ws(CParser *p)
@@ -3012,6 +3097,8 @@ static bool cparser_parse_struct(CParser *p, bool is_union)
 			FFI_UnionType *ut =
 				(FFI_UnionType *)ring_state_malloc(p->ctx->ring_state, sizeof(FFI_UnionType));
 			memset(ut, 0, sizeof(FFI_UnionType));
+			ring_list_addcustomringpointer_gc(p->ctx->ring_state, p->ctx->gc_list, ut,
+											  ffi_gc_free_union_type);
 			ut->name = ring_state_malloc(p->ctx->ring_state, strlen(name) + 1);
 			if (ut->name)
 				strcpy(ut->name, name);
@@ -3103,6 +3190,8 @@ static bool cparser_parse_enum(CParser *p)
 		FFI_EnumType *et =
 			(FFI_EnumType *)ring_state_malloc(p->ctx->ring_state, sizeof(FFI_EnumType));
 		memset(et, 0, sizeof(FFI_EnumType));
+		ring_list_addcustomringpointer_gc(p->ctx->ring_state, p->ctx->gc_list, et,
+										  ffi_gc_free_enum);
 		et->name = ring_state_malloc(p->ctx->ring_state, strlen(name) + 1);
 		if (et->name)
 			strcpy(et->name, name);
@@ -3402,6 +3491,8 @@ finish_func:
 		func->type = ft;
 
 		ring_list_addpointer_gc(p->ctx->ring_state, p->result_list, func);
+		ring_list_addcustomringpointer_gc(p->ctx->ring_state, p->ctx->gc_list, func,
+										  ffi_gc_free_func);
 		p->decl_count++;
 	} else {
 		FFI_Type **pcopy = NULL;
@@ -3415,6 +3506,8 @@ finish_func:
 			ffi_function_create(p->ctx, p->lib, func_name, ret_ffi, pcopy, param_count);
 		if (func) {
 			ring_list_addpointer_gc(p->ctx->ring_state, p->result_list, func);
+			ring_list_addcustomringpointer_gc(p->ctx->ring_state, p->ctx->gc_list, func,
+											  ffi_gc_free_func);
 			p->decl_count++;
 		} else {
 			p->decl_count++;
@@ -3752,14 +3845,22 @@ RING_FUNC(ring_cffi_varcall)
 				if (!(i < fixed_count && func->type->param_types)) {
 					arg_types[i] = &ffi_type_pointer;
 				}
-				void *ptr_val;
+				void *ptr_val = NULL;
+				const char *ptr_type = NULL;
 				if (aArgs) {
 					List *argList = ring_list_getlist(aArgs, i + 1);
 					ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+					ptr_type = ring_list_getstring(argList, RING_CPOINTER_TYPE);
 				} else {
 					List *argList = RING_API_GETLIST(param_idx);
 					ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+					ptr_type = ring_list_getstring(argList, RING_CPOINTER_TYPE);
 				}
+
+				if (ptr_type && strcmp(ptr_type, "FFI_Callback") == 0 && ptr_val) {
+					ptr_val = ((FFI_Callback *)ptr_val)->code_ptr;
+				}
+
 				*(void **)storage_ptr = ptr_val;
 				storage_ptr += sizeof(void *);
 			} else {
@@ -3873,6 +3974,17 @@ RING_FUNC(ring_cffi_varcall)
 
 RING_LIBINIT
 {
+#ifdef _WIN32
+	HMODULE hModule;
+	GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+					  (LPCTSTR)&ringlib_init, &hModule);
+#else
+	Dl_info info;
+	if (dladdr((void *)&ringlib_init, &info)) {
+		dlopen(info.dli_fname, RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+	}
+#endif
+
 	RING_API_REGISTER("cffi_load", ring_cffi_load);
 	RING_API_REGISTER("cffi_new", ring_cffi_new);
 	RING_API_REGISTER("cffi_sizeof", ring_cffi_sizeof);
