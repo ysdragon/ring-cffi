@@ -251,7 +251,6 @@ const char *ffi_get_error(FFI_Context *ctx);
  * ============================================================ */
 
 FFI_Library *ffi_library_open(FFI_Context *ctx, const char *path);
-void ffi_library_close(FFI_Library *lib);
 void *ffi_library_symbol(FFI_Library *lib, const char *name);
 
 /* ============================================================

@@ -604,13 +604,6 @@ static void ffi_gc_free_lib(void *state, void *ptr)
 	ring_state_free((RingState *)state, lib);
 }
 
-void ffi_library_close(FFI_Library *lib)
-{
-	if (!lib)
-		return;
-	ffi_gc_free_lib(lib->ring_state, lib);
-}
-
 static void ffi_gc_free_func(void *state, void *ptr)
 {
 	FFI_Function *func = (FFI_Function *)ptr;
