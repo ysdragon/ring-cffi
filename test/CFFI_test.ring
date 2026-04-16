@@ -177,6 +177,7 @@ class CFFITest
 		run("test_isnull", :test_isnull)
 		run("test_ptr_get_set_int", :test_ptr_get_set_int)
 		run("test_ptr_get_set_double", :test_ptr_get_set_double)
+		run("test_ptr_get_set_i64", :test_ptr_get_set_i64)
 		run("test_ptr_offset", :test_ptr_offset)
 		run("test_deref", :test_deref)
 		? ""
@@ -297,6 +298,7 @@ class CFFITest
 		run("test_ffi_class_isNullPtr", :test_ffi_class_isNullPtr)
 		run("test_ffi_class_ptrGet", :test_ffi_class_ptrGet)
 		run("test_ffi_class_ptrSet", :test_ffi_class_ptrSet)
+		run("test_ffi_class_i64GetSet", :test_ffi_class_i64GetSet)
 		run("test_ffi_class_deref", :test_ffi_class_deref)
 		run("test_ffi_class_derefTyped", :test_ffi_class_derefTyped)
 		run("test_ffi_class_offset", :test_ffi_class_offset)
@@ -477,6 +479,18 @@ class CFFITest
 		cffi_set(pDbl, "double", 2.71828)
 		nVal = cffi_get(pDbl, "double")
 		assert(nVal > 2.71 and nVal < 2.72, "get/set double should work")
+
+	func test_ptr_get_set_i64
+		pI64 = cffi_new("int64")
+		cValue = "9223372036854775807" # Max int64
+		cffi_set_i64(pI64, cValue)
+		cResult = cffi_get_i64(pI64)
+		assertEq(cResult, cValue, "get/set i64 should work for max positive")
+		
+		cValue = "-9223372036854775808" # Min int64
+		cffi_set_i64(pI64, cValue)
+		cResult = cffi_get_i64(pI64)
+		assertEq(cResult, cValue, "get/set i64 should work for min negative")
 
 	func test_ptr_offset
 		pArr = cffi_new("int", 3)
@@ -1176,6 +1190,14 @@ class CFFITest
 		pInt = oTest.alloc("int")
 		oTest.ptrSet(pInt, "int", 99999)
 		assertEq(oTest.ptrGet(pInt, "int"), 99999, "ptrSet should write value")
+
+	func test_ffi_class_i64GetSet
+		oTest = new FFI
+		pI64 = oTest.alloc("int64")
+		cValue = "1234567890123456789"
+		oTest.i64Set(pI64, cValue, NULL)
+		cResult = oTest.i64Get(pI64, NULL)
+		assertEq(cResult, cValue, "i64Get/i64Set should work in FFI class")
 
 	func test_ffi_class_deref
 		oTest = new FFI
