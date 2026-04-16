@@ -265,6 +265,8 @@ ffi = new FFI
 | `isNullPtr(pPtr)` | `pPtr`: pointer — pointer to check | Check if pointer is NULL |
 | `ptrGet(pPtr, cType)` | `pPtr`: pointer — memory pointer, `cType`: string — type name | Read value from pointer |
 | `ptrSet(pPtr, cType, value)` | `pPtr`: pointer — memory pointer, `cType`: string — type name, `value`: any — value to write | Write value to pointer |
+| `i64Get(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read 64-bit integer as string (avoids precision loss) |
+| `i64Set(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — 64-bit integer as string, `nIndex`: number (optional) — array index | Write 64-bit integer from string |
 | `deref(pPtr)` | `pPtr`: pointer — pointer to dereference | Dereference a pointer, returning the pointed-to pointer |
 | `derefTyped(pPtr, cType)` | `pPtr`: pointer — pointer to dereference, `cType`: string — type name | Dereference a pointer with explicit type |
 | `offset(pPtr, nOffset)` | `pPtr`: pointer — base pointer, `nOffset`: number — byte offset | Offset a pointer by bytes |
@@ -310,6 +312,8 @@ These are the underlying native C extension functions exposed to Ring via `RING_
 | `cffi_sym(pLib, cName)` | `pLib`: pointer — library handle, `cName`: string — symbol name | Look up symbol in loaded library |
 | `cffi_get(pPtr, cType, [nIndex])` | `pPtr`: pointer — memory pointer, `cType`: string — type name, `nIndex`: number (optional) — array index | Read value from pointer |
 | `cffi_set(pPtr, cType, value, [nIndex])` | `pPtr`: pointer — memory pointer, `cType`: string — type name, `value`: any — value to write, `nIndex`: number (optional) — array index | Write value to pointer |
+| `cffi_get_i64(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read 64-bit integer as string |
+| `cffi_set_i64(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — 64-bit integer string, `nIndex`: number (optional) — array index | Write 64-bit integer from string |
 | `cffi_deref(pPtr, [cType])` | `pPtr`: pointer — pointer to dereference, `cType`: string (optional) — type name | Dereference a pointer |
 | `cffi_offset(pPtr, nOffset)` | `pPtr`: pointer — base pointer, `nOffset`: number — byte offset | Offset a pointer by bytes |
 | `cffi_struct(cName, [aFields])` | `cName`: string — struct name, `aFields`: list (optional) — field definitions `[["name", "type"], ...]` | Define a C struct |
