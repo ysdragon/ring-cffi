@@ -35,6 +35,7 @@
 -   📝 **C String Handling**: Seamless conversion between Ring and C strings
 -   🌍 **Cross-Platform**: Works on Windows, Linux, macOS, and FreeBSD
 -   ⚡ **High-Level OOP API**: Clean `FFI` class with intuitive method names
+-   🔗 **Dynamic Binding**: Bind C functions as native Ring functions/methods
 
 ## 📥 Installation
 
@@ -118,7 +119,7 @@ pNull = ffi.nullptr()
 ```ring
 load "cffi.ring"
 
-ffi = new FFI("libc.so.6")
+ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
 
 # Create a C string
 cStr = ffi.string("Hello from Ring!")
@@ -205,7 +206,7 @@ colors = ffi.enum("Colors", [
 ```ring
 load "cffi.ring"
 
-ffi = new FFI("libc.so.6")
+ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
 
 # Create a C callback
 cb = ffi.callback("myCompare", "int", ["ptr", "ptr"])
@@ -228,7 +229,7 @@ func myCompare(pA, pB)
 ```ring
 load "cffi.ring"
 
-ffi = new FFI("libc.so.6")
+ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
 
 # Get a function pointer directly
 pFunc = ffi.sym("strlen")
@@ -249,6 +250,65 @@ ffi = new FFI
 # Get error information (errno is set by previous C calls)
 ? "Errno: " + ffi.errno()
 ? "Error: " + ffi.strError()
+```
+
+### Dynamic Binding
+
+Bind C functions as directly callable Ring functions — no manual `cffi_invoke()` needed.
+
+#### `cffi_bind()` — Low-level native registration
+
+Register a single C function, or batch-register all `cffi_cdef`'d functions, as true native Ring functions via `ring_vm_funcregister2()`. No eval overhead — dispatched by the VM like any built-in C function.
+
+```ring
+pLib = cffi_load("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+
+# Single function
+cffi_bind(pLib, "abs", "int", ["int"])
+? abs(-42)  # 42
+
+# Batch: cdef first, then bind all
+cffi_cdef(pLib, "long labs(long); int atoi(const char*);")
+nCount = cffi_bind()  # Register all cdef'd functions
+? labs(-123456)       # 123456
+? atoi(cffi_string("777"))  # 777
+```
+
+#### `bindNative()` — High-level single native function
+
+```ring
+ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+
+ffi.bindNative("abs", "int", ["int"])
+? abs(-42)  # 42 — called like a native function
+```
+
+#### `bindAll()` — High-level batch from cdef
+
+Auto-registers **all** functions declared via `cdef()` as native Ring functions in one call.
+
+```ring
+ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+
+ffi.cdef("int abs(int); long labs(long); int atoi(const char*);")
+nCount = ffi.bindAll()  # Register all 3 as native
+? abs(-99)              # 99
+? labs(-123456)         # 123456
+? atoi(ffi.string("777"))  # 777
+```
+
+#### `bind()` — Method on FFI object
+
+Uses `addMethod()` to attach C functions as methods on the FFI instance.
+
+```ring
+ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+
+ffi.bind("atoi", "int", ["ptr"])
+? ffi.atoi(ffi.string("999"))  # 999
+
+ffi.bind("strlen", "int", ["ptr"])
+? ffi.strlen("hello")  # 5
 ```
 
 ## 📚 API Reference
@@ -293,6 +353,9 @@ ffi = new FFI
 | `enumValue(oEnum, cVariant)` | `oEnum`: pointer — enum definition, `cVariant`: string — variant name | Get enum variant value |
 | `callback(cRingFunc, cRetType, [aArgTypes])` | `cRingFunc`: string — Ring function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Create C callback |
 | `cdef(cDef)` | `cDef`: string — C definition source | Parse C definition string |
+| `bindNative(cName, cRetType, [aArgTypes])` | `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Bind C function as native Ring function |
+| `bindAll()` | *(none)* | Bind all cdef'd functions as native Ring functions |
+| `bind(cName, cRetType, [aArgTypes])` | `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Bind C function as method on FFI object |
 | `errno()` | *(none)* | Get last C errno value |
 | `strError()` | *(none)* | Get error string for errno |
 
@@ -336,6 +399,7 @@ These are the underlying native C extension functions exposed to Ring via `RING_
 | `cffi_varfunc(pLib, cName, cRetType, [aArgTypes])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — fixed argument type strings (fixed count inferred from list length) | Create variadic function wrapper |
 | `cffi_varcall(oFunc, [aArgs])` | `oFunc`: pointer — variadic function handle, `aArgs`: list (optional) — arguments | Call a variadic function wrapper |
 | `cffi_cdef(pLib, cDeclarations)` | `pLib`: pointer — library handle (can be NULL), `cDeclarations`: string — C definition source | Parse C definition string |
+| `cffi_bind([pLib, cName, cRetType, aArgTypes])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings. **No args** = bind all cdef functions | Bind C function(s) as native Ring function(s) |
 
 ### Supported C Types
 
@@ -427,6 +491,7 @@ Check the [`examples/`](examples/) directory for usage examples covering:
 | 21 | 🏛️ OOP Structs/Unions | High-level `FFI` class — structs and unions |
 | 22 | 🧹 OOP Misc | High-level `FFI` class — misc operations |
 | 23 | 📊 OOP qsort | Complete `qsort` callback example |
+| 24 | 🔗 Dynamic Binding | `cffi_bind`, `bindNative`, `bindAll`, `bind` — native and OOP binding |
 
 ## 🛠️ Development
 
