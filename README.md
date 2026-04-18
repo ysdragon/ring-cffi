@@ -46,6 +46,11 @@ ringpm install ring-cffi from ysdragon
 
 ## 🚀 Quick Start
 
+> [!NOTE]  
+> **Safe 64-bit Integer Handling:** To prevent precision loss (as Ring natively stores numbers as 64-bit floats limited to $2^{53}-1$), all 64-bit integer types like `int64`, `uint64`, and `long long` are bridged as **strings**. 
+> 
+> When reading these values from C, you will receive a string (e.g., `"9223372036854775807"`); when writing them to C, you must provide a string. Use the high-level `i64Get()`/`i64Set()` methods or the low-level `cffi_get_i64()`/`cffi_set_i64()` functions to ensure data integrity.
+
 ```ring
 load "cffi.ring"
 
