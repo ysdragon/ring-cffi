@@ -91,3 +91,18 @@ jobs:
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    needs: [ update-libs ]
+    if: needs.update-libs.result == 'success'
+    strategy:
+      matrix:
+        os: [ macos-latest, ubuntu-latest, ubuntu-24.04-arm, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Run tests
+      uses: ysdragon/ring-action@v1
+      with:
+        file: "test/CFFI_test.ring"
