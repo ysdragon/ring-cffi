@@ -51,8 +51,7 @@ ringpm install ring-cffi from ysdragon
 load "cffi.ring"
 
 # Load libc and call printf
-ffi = new FFI {
-    loadLib("libc.so.6")  # or msvcrt.dll on Windows
+new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
     oPrintf = varFunc("printf", "int", ["string"])
     varcall(oPrintf, ["Hello from Ring! Value: %d\n", 42])
 }
@@ -65,21 +64,16 @@ ffi = new FFI {
 ```ring
 load "cffi.ring"
 
-ffi = new FFI
+new FFI("libm.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+	# Call a simple function (sqrt)
+	oSqrt = cFunc("sqrt", "double", ["double"])
+	result = invoke(oSqrt, [25.0])
+	? "sqrt(25) = " + result  # 5.0
 
-# Load a shared library
-ffi.loadLib("libm.so.6")  # Math library on Linux
-# ffi.loadLib("msvcrt.dll")  # C runtime on Windows
-# ffi.loadLib("libSystem.B.dylib")  # macOS system library
-
-# Call a simple function (sqrt)
-oSqrt = ffi.cFunc("sqrt", "double", ["double"])
-result = ffi.invoke(oSqrt, [25.0])
-? "sqrt(25) = " + result  # 5.0
-
-# Call printf (variadic function)
-oPrintf = ffi.varFunc("printf", "int", ["string"])
-ffi.varcall(oPrintf, ["Hello, %s! Number: %d\n", "World", 123])
+	# Call printf (variadic function)
+	oPrintf = varFunc("printf", "int", ["string"])
+	varcall(oPrintf, ["Hello, %s! Number: %d\n", "World", 123])
+}
 ```
 
 ### Memory Allocation and Pointers
@@ -87,26 +81,26 @@ ffi.varcall(oPrintf, ["Hello, %s! Number: %d\n", "World", 123])
 ```ring
 load "cffi.ring"
 
-ffi = new FFI
+new FFI {
+	# Allocate memory for an integer
+	pInt = alloc("int")
 
-# Allocate memory for an integer
-pInt = ffi.alloc("int")
+	# Write a value to the pointer
+	ptrSet(pInt, "int", 42)
 
-# Write a value to the pointer
-ffi.ptrSet(pInt, "int", 42)
+	# Read the value back
+	? ptrGet(pInt, "int")  # 42
 
-# Read the value back
-? ffi.ptrGet(pInt, "int")  # 42
+	# Pointer arithmetic
+	pNext = offset(pInt, 4)  # Move 4 bytes forward
 
-# Pointer arithmetic
-pNext = ffi.offset(pInt, 4)  # Move 4 bytes forward
+	# Check for NULL
+	pNull = nullptr()
+	? isNullPtr(pNull)  # 1 (true)
 
-# Check for NULL
-pNull = ffi.nullptr()
-? ffi.isNullPtr(pNull)  # 1 (true)
-
-# Get size of a type
-? ffi.sizeof("double")  # 8
+	# Get size of a type
+	? sizeof("double")  # 8
+}
 ```
 
 ### Working with C Strings
@@ -114,13 +108,13 @@ pNull = ffi.nullptr()
 ```ring
 load "cffi.ring"
 
-ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+    # Create a C string
+    cStr = string("Hello from Ring!")
 
-# Create a C string
-cStr = ffi.string("Hello from Ring!")
-
-# Read it back
-? ffi.toString(cStr)  # "Hello from Ring!"
+    # Read it back
+    ? toString(cStr)  # "Hello from Ring!"
+}
 ```
 
 ### Defining and Using Structs
@@ -128,31 +122,31 @@ cStr = ffi.string("Hello from Ring!")
 ```ring
 load "cffi.ring"
 
-ffi = new FFI
+new FFI {
+	# Define a Point struct
+	point = defineStruct("Point", [
+		["x", "int"],
+		["y", "int"],
+		["name", "string"]
+	])
 
-# Define a Point struct
-point = ffi.defineStruct("Point", [
-    ["x", "int"],
-    ["y", "int"],
-    ["name", "string"]
-])
+	# Allocate a new struct instance
+	pPoint = structNew(point)
 
-# Allocate a new struct instance
-pPoint = ffi.structNew(point)
+	# Set field values
+	ptrSet(fieldPtr(pPoint, point, "x"), "int", 10)
+	ptrSet(fieldPtr(pPoint, point, "y"), "int", 20)
+	ptrSet(fieldPtr(pPoint, point, "name"), "ptr", string("MyPoint"))
 
-# Set field values
-ffi.ptrSet(ffi.fieldPtr(pPoint, point, "x"), "int", 10)
-ffi.ptrSet(ffi.fieldPtr(pPoint, point, "y"), "int", 20)
-ffi.ptrSet(ffi.fieldPtr(pPoint, point, "name"), "string", "MyPoint")
+	# Read field values
+	? "x = " + ptrGet(field(pPoint, point, "x"), "int")  # 10
+	? "y = " + ptrGet(field(pPoint, point, "y"), "int")  # 20
+	? "name = " + toString(ptrGet(field(pPoint, point, "name"), "ptr"))  # "MyPoint"
 
-# Read field values
-? "x = " + ffi.field(pPoint, point, "x")  # 10
-? "y = " + ffi.field(pPoint, point, "y")  # 20
-? "name = " + ffi.field(pPoint, point, "name")  # "MyPoint"
-
-# Get struct info
-? "Size: " + ffi.structSize(point) + " bytes"
-? "Offset of y: " + ffi.fieldOffset(point, "y")
+	# Get struct info
+	? "Size: " + structSize(point) + " bytes"
+	? "Offset of y: " + fieldOffset(point, "y")
+}
 ```
 
 ### Defining and Using Unions
@@ -160,21 +154,21 @@ ffi.ptrSet(ffi.fieldPtr(pPoint, point, "name"), "string", "MyPoint")
 ```ring
 load "cffi.ring"
 
-ffi = new FFI
+new FFI {
+	# Define a union
+	data = defineUnion("Data", [
+		["i", "int"],
+		["f", "float"],
+		["c", "char"]
+	])
 
-# Define a union
-data = ffi.defineUnion("Data", [
-    ["i", "int"],
-    ["f", "float"],
-    ["c", "char"]
-])
+	# Allocate and use
+	pData = unionNew(data)
+	ptrSet(fieldPtr(pData, data, "i"), "int", 42)
+	? ptrGet(field(pData, data, "i"), "int")  # 42
 
-# Allocate and use
-pData = ffi.unionNew(data)
-ffi.ptrSet(pData, "int", 42)
-? ffi.field(pData, data, "i")  # 42
-
-? "Union size: " + ffi.unionSize(data)  # Size of largest member
+	? "Union size: " + unionSize(data)  # Size of largest member
+}
 ```
 
 ### Defining and Using Enums
@@ -182,18 +176,18 @@ ffi.ptrSet(pData, "int", 42)
 ```ring
 load "cffi.ring"
 
-ffi = new FFI
+new FFI {
+	# Define an enum
+	colors = enum("Colors", [
+		["RED", 0],
+		["GREEN", 1],
+		["BLUE", 2]
+	])
 
-# Define an enum
-colors = ffi.enum("Colors", [
-    ["RED", 0],
-    ["GREEN", 1],
-    ["BLUE", 2]
-])
-
-? ffi.enumValue(colors, "RED")    # 0
-? ffi.enumValue(colors, "GREEN")  # 1
-? ffi.enumValue(colors, "BLUE")   # 2
+	? enumValue(colors, "RED")    # 0
+	? enumValue(colors, "GREEN")  # 1
+	? enumValue(colors, "BLUE")   # 2
+}
 ```
 
 ### Creating Callbacks
@@ -224,15 +218,15 @@ func myCompare(pA, pB)
 ```ring
 load "cffi.ring"
 
-ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+    # Get a function pointer directly
+    pFunc = sym("strlen")
 
-# Get a function pointer directly
-pFunc = ffi.sym("strlen")
-
-# Create callable from pointer
-oFunc = ffi.funcPtr(pFunc, "int", ["string"])
-result = ffi.invoke(oFunc, ["Hello"])
-? "strlen(Hello) = " + result
+    # Create callable from pointer
+    oFunc = funcPtr(pFunc, "int", ["string"])
+    result = invoke(oFunc, ["Hello"])
+    ? "strlen(Hello) = " + result # strlen(Hello) = 5
+}
 ```
 
 ### Error Handling
@@ -240,11 +234,11 @@ result = ffi.invoke(oFunc, ["Hello"])
 ```ring
 load "cffi.ring"
 
-ffi = new FFI
-
-# Get error information (errno is set by previous C calls)
-? "Errno: " + ffi.errno()
-? "Error: " + ffi.strError()
+new FFI {
+    # Get error information (errno is set by previous C calls)
+    ? "Errno: " + errno()
+    ? "Error: " + strError()
+}
 ```
 
 ### Dynamic Binding
@@ -256,6 +250,8 @@ Bind C functions as directly callable Ring functions — no manual `cffi_invoke(
 Register a single C function, or batch-register all `cffi_cdef`'d functions, as true native Ring functions via `ring_vm_funcregister2()`. No eval overhead — dispatched by the VM like any built-in C function.
 
 ```ring
+load "cffi.ring"
+
 pLib = cffi_load("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
 
 # Single function
@@ -264,7 +260,7 @@ cffi_bind(pLib, "abs", "int", ["int"])
 
 # Batch: cdef first, then bind all
 cffi_cdef(pLib, "long labs(long); int atoi(const char*);")
-nCount = cffi_bind()  # Register all cdef'd functions
+cffi_bind()  # Register all cdef'd functions
 ? labs(-123456)       # 123456
 ? atoi(cffi_string("777"))  # 777
 ```
@@ -272,9 +268,12 @@ nCount = cffi_bind()  # Register all cdef'd functions
 #### `bindNative()` — High-level single native function
 
 ```ring
-ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+load "cffi.ring"
 
-ffi.bindNative("abs", "int", ["int"])
+new FFI("libc.so.6") {  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+    bindNative("abs", "int", ["int"])
+}
+
 ? abs(-42)  # 42 — called like a native function
 ```
 
@@ -283,13 +282,16 @@ ffi.bindNative("abs", "int", ["int"])
 Auto-registers **all** functions declared via `cdef()` as native Ring functions in one call.
 
 ```ring
-ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+load "cffi.ring"
 
-ffi.cdef("int abs(int); long labs(long); int atoi(const char*);")
-nCount = ffi.bindAll()  # Register all 3 as native
+new FFI("libc.so.6")  { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+	cdef("int abs(int); long labs(long); int atoi(const char*);")
+	bindAll()  # Register all 3 as native
+}
+
 ? abs(-99)              # 99
 ? labs(-123456)         # 123456
-? atoi(ffi.string("777"))  # 777
+? atoi("777")  # 777
 ```
 
 #### `bind()` — Method on FFI object
@@ -297,13 +299,17 @@ nCount = ffi.bindAll()  # Register all 3 as native
 Uses `addMethod()` to attach C functions as methods on the FFI instance.
 
 ```ring
-ffi = new FFI("libc.so.6")  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+load "cffi.ring"
 
-ffi.bind("atoi", "int", ["ptr"])
-? ffi.atoi(ffi.string("999"))  # 999
+ffi = new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+	bind("atoi", "int", ["ptr"])
+	? atoi("999")  # 999
 
-ffi.bind("strlen", "int", ["ptr"])
-? ffi.strlen("hello")  # 5
+	bind("strlen", "int", ["ptr"])
+	? strlen("hello")  # 5
+}
+
+? ffi.strlen("Hello, World!") # 13
 ```
 
 ## 📚 API Reference
