@@ -66,7 +66,8 @@ aPackageInfo = [
 		"examples/20_oop_pointers.ring",
 		"examples/21_oop_structs_unions.ring",
 		"examples/22_oop_misc.ring",
-		"examples/23_oop_qsort.ring"
+		"examples/23_oop_qsort.ring",
+		"examples/24_bind.ring"
 	],
 	:ringfolderfiles = 	[
 
