@@ -2,17 +2,12 @@
 
 # Ring CFFI
 
-[license]: https://img.shields.io/github/license/ysdragon/ring-cffi?style=for-the-badge&logo=opensourcehardware&label=License&logoColor=C0CAF5&labelColor=414868&color=8c73cc
-[language-ring]: https://img.shields.io/badge/language-Ring-2D54CB.svg?style=for-the-badge&labelColor=414868
-[platform]: https://img.shields.io/badge/Platform-Windows%20|%20Linux%20|%20macOS%20|%20FreeBSD-8c73cc.svg?style=for-the-badge&labelColor=414868
-[version]: https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2Fysdragon%2Fring-cffi%2Fmaster%2Fpackage.ring&search=%3Aversion\s*%3D\s*"([^"]%2B)"&replace=%241&style=for-the-badge&label=version&labelColor=414868&color=7664C6
-[beta]: https://img.shields.io/badge/Status-Beta-blue.svg?style=for-the-badge&labelColor=414868&color=3b82f6
-
-[![][license]](LICENSE)
-[![][language-ring]](https://ring-lang.github.io/)
-[![][platform]](#)
-[![][version]](#)
-[![][beta]](#)
+[![](https://img.shields.io/github/license/ysdragon/ring-cffi?style=for-the-badge&logo=opensourcehardware&label=License&logoColor=C0CAF5&labelColor=414868&color=8c73cc)](LICENSE)
+[![](https://img.shields.io/github/v/tag/ysdragon/ring-cffi?style=for-the-badge&label=latest&labelColor=414868&color=7664C6)](https://github.com/ysdragon/ring-cffi/tags)
+[![](https://img.shields.io/badge/language-Ring-2D54CB.svg?style=for-the-badge&labelColor=414868)](https://ring-lang.github.io/)
+[![](https://img.shields.io/badge/Platform-Windows%20|%20Linux%20|%20macOS%20|%20FreeBSD-8c73cc.svg?style=for-the-badge&labelColor=414868)](#)
+[![](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2Fysdragon%2Fring-cffi%2Fmaster%2Fpackage.ring&search=%3Aversion\s*%3D\s*"([^"]%2B)"&replace=%241&style=for-the-badge&label=package&labelColor=414868&color=7664C6)](#)
+[![](https://img.shields.io/github/actions/workflow/status/ysdragon/ring-cffi/testCI.yml?style=for-the-badge&label=tests&labelColor=414868&color=2ea043)](https://github.com/ysdragon/ring-cffi/actions/workflows/testCI.yml)
 
 **Foreign Function Interface (FFI) for the Ring programming language**
 
