@@ -839,6 +839,16 @@ static void ffi_context_free(void *state, void *ptr)
 		g_ffi_ctx = NULL;
 }
 
+static void cdef_funcs_set(FFI_Context *ctx, const char *key, void *value)
+{
+	HashItem *item = ring_hashtable_finditem_gc(ctx->ring_state, ctx->cdef_funcs, key);
+	if (item && item->nItemType == RING_HASHITEMTYPE_POINTER) {
+		item->HashValue.pValue = value;
+	} else {
+		ring_hashtable_newpointer_gc(ctx->ring_state, ctx->cdef_funcs, key, value);
+	}
+}
+
 static FFI_Context *get_or_create_context(void *pPointer)
 {
 	VM *vm = (VM *)pPointer;
@@ -3443,7 +3453,7 @@ finish_func:
 											  ffi_gc_free_func);
 			for (int i = 0; func_name[i]; i++)
 				func_name[i] = tolower((unsigned char)func_name[i]);
-			ring_hashtable_newpointer_gc(p->ctx->ring_state, p->ctx->cdef_funcs, func_name, func);
+			cdef_funcs_set(p->ctx, func_name, func);
 			p->decl_count++;
 		} else {
 			p->decl_count++;
@@ -4048,7 +4058,7 @@ RING_FUNC(ring_cffi_bind)
 		return;
 	}
 
-	ring_hashtable_newpointer_gc(ctx->ring_state, ctx->cdef_funcs, lower_name, func);
+	cdef_funcs_set(ctx, lower_name, func);
 
 	void *trampoline = ffi_create_trampoline(ctx, func);
 	if (!trampoline) {
