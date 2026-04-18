@@ -259,8 +259,8 @@ FFI_Type *ffi_type_primitive(FFI_Context *ctx, FFI_TypeKind kind)
 	memset(type, 0, sizeof(FFI_Type));
 	type->kind = kind;
 	type->ffi_type_ptr = ffi_get_primitive_type(kind);
-	type->size = ffi_get_primitive_size(kind);
-	type->alignment = type->size;
+	type->size = type->ffi_type_ptr->size;
+	type->alignment = type->ffi_type_ptr->alignment;
 	type->pointer_depth = 0;
 
 	return type;
@@ -292,9 +292,12 @@ FFI_StructType *ffi_struct_define(FFI_Context *ctx, const char *name)
 
 	memset(st, 0, sizeof(FFI_StructType));
 	if (name) {
-		st->name = ring_state_malloc(ctx->ring_state, strlen(name) + 1);
-		if (st->name)
-			strcpy(st->name, name);
+		st->name = (char *)ring_state_malloc(ctx->ring_state, strlen(name) + 1);
+		if (!st->name) {
+			ring_state_free(ctx->ring_state, st);
+			return NULL;
+		}
+		strcpy(st->name, name);
 	}
 
 	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, st, ffi_gc_free_struct_type);
@@ -1498,13 +1501,13 @@ RING_FUNC(ring_cffi_invoke)
 			return;
 		}
 
-		char *storage_ptr = (char *)arg_storage;
+		size_t current_offset = 0;
 
 		for (int i = 0; i < arg_count; i++) {
 			FFI_Type *ptype = func->type->param_types[i];
-			size_t current_offset = (size_t)storage_ptr;
-			storage_ptr = (char *)FFI_ALIGN(current_offset, ptype->alignment);
-			arg_values[i] = storage_ptr;
+			current_offset = FFI_ALIGN(current_offset, ptype->alignment > 0 ? ptype->alignment : 1);
+			arg_values[i] = (char *)arg_storage + current_offset;
+			char *storage_ptr = (char *)arg_values[i];
 
 			int param_idx = aArgs ? 0 : (2 + i);
 
@@ -1549,12 +1552,13 @@ RING_FUNC(ring_cffi_invoke)
 				}
 
 				*(void **)storage_ptr = ptr_val;
-				storage_ptr = (char *)FFI_ALIGN((size_t)(storage_ptr + sizeof(void *)), 16);
+				current_offset += sizeof(void *);
+				current_offset = FFI_ALIGN(current_offset, 16);
 			} else if (aArgs ? ring_list_isdouble(aArgs, i + 1) : RING_API_ISNUMBER(param_idx)) {
 				double val =
 					aArgs ? ring_list_getdouble(aArgs, i + 1) : RING_API_GETNUMBER(param_idx);
 				ffi_write_typed_value(storage_ptr, ptype, val);
-				storage_ptr += ptype->size;
+				current_offset += ptype->size > 0 ? ptype->size : sizeof(int);
 			} else if (aArgs ? ring_list_isstring(aArgs, i + 1) : RING_API_ISSTRING(param_idx)) {
 				const char *str =
 					aArgs ? ring_list_getstring(aArgs, i + 1) : RING_API_GETSTRING(param_idx);
@@ -1567,10 +1571,13 @@ RING_FUNC(ring_cffi_invoke)
 					} else {
 						*(int64_t *)storage_ptr = (int64_t)strtoll(str, NULL, 10);
 					}
-					storage_ptr += ptype->size;
+					current_offset += ptype->size;
 				} else {
-					*(const char **)storage_ptr = str;
-					storage_ptr += sizeof(void *);
+					RING_API_ERROR("ffi_invoke: type mismatch, string passed to "
+								   "non-pointer/non-64bit parameter");
+					ring_state_free(ctx->ring_state, arg_storage);
+					ring_state_free(ctx->ring_state, arg_values);
+					return;
 				}
 			} else {
 				RING_API_ERROR("ffi_invoke: unsupported argument type");
@@ -1721,7 +1728,13 @@ RING_FUNC(ring_cffi_set)
 			List *valList = RING_API_GETLIST(3);
 			val = ring_list_getpointer(valList, RING_CPOINTER_POINTER);
 		} else if (RING_API_ISSTRING(3)) {
-			val = (void *)RING_API_GETSTRING(3);
+			const char *raw_str = RING_API_GETSTRING(3);
+			val = (void *)ffi_string_new(ctx, raw_str);
+			if (!val) {
+				RING_API_ERROR("ffi_set: out of memory allocating string");
+				return;
+			}
+			ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, val, ffi_gc_free_ptr);
 		} else if (RING_API_ISNUMBER(3) && RING_API_GETNUMBER(3) == 0) {
 			val = NULL;
 		}
@@ -1978,6 +1991,17 @@ RING_FUNC(ring_cffi_typeof)
 	RING_API_ERROR("ffi_typeof: type not found");
 }
 
+static FFI_StructField *ffi_union_find_field(FFI_UnionType *ut, const char *name)
+{
+	FFI_StructField *field = ut->fields;
+	while (field) {
+		if (field->name && strcmp(field->name, name) == 0)
+			return field;
+		field = field->next;
+	}
+	return NULL;
+}
+
 static FFI_StructField *ffi_struct_find_field(FFI_StructType *st, const char *name)
 {
 	FFI_StructField *field = st->fields;
@@ -2053,7 +2077,7 @@ RING_FUNC(ring_cffi_field)
 		RING_API_ERROR("ffi_field: field not found in struct");
 	} else if (type->kind == FFI_KIND_UNION) {
 		FFI_UnionType *ut = type->info.union_type;
-		FFI_StructField *ufield = ffi_struct_find_field((FFI_StructType *)ut, field_name);
+		FFI_StructField *ufield = ffi_union_find_field(ut, field_name);
 		if (ufield) {
 			RING_API_RETCPOINTER(ptr, "FFI_Ptr");
 			return;
@@ -2513,9 +2537,12 @@ RING_FUNC(ring_cffi_union)
 	memset(ut, 0, sizeof(FFI_UnionType));
 	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, ut, ffi_gc_free_union_type);
 
-	ut->name = ring_state_malloc(ctx->ring_state, strlen(name) + 1);
-	if (ut->name)
-		strcpy(ut->name, name);
+	ut->name = (char *)ring_state_malloc(ctx->ring_state, strlen(name) + 1);
+	if (!ut->name) {
+		RING_API_ERROR("ffi_union: out of memory");
+		return;
+	}
+	strcpy(ut->name, name);
 
 	size_t max_size = 0;
 	size_t max_align = 1;
@@ -3654,7 +3681,7 @@ RING_FUNC(ring_cffi_varcall)
 			return;
 		}
 
-		char *storage_ptr = (char *)arg_storage;
+		size_t current_offset = 0;
 
 		for (int i = 0; i < total_args; i++) {
 			int param_idx;
@@ -3666,15 +3693,15 @@ RING_FUNC(ring_cffi_varcall)
 
 			if (i < fixed_count && func->type->param_types) {
 				FFI_Type *ptype = func->type->param_types[i];
-				size_t current_offset = (size_t)storage_ptr;
-				storage_ptr = (char *)FFI_ALIGN(current_offset, ptype->alignment);
-				arg_values[i] = storage_ptr;
+				current_offset =
+					FFI_ALIGN(current_offset, ptype->alignment > 0 ? ptype->alignment : 1);
+				arg_values[i] = (char *)arg_storage + current_offset;
 				arg_types[i] = ptype->ffi_type_ptr;
 			} else {
-				size_t current_offset = (size_t)storage_ptr;
-				storage_ptr = (char *)FFI_ALIGN(current_offset, sizeof(void *));
-				arg_values[i] = storage_ptr;
+				current_offset = FFI_ALIGN(current_offset, sizeof(void *));
+				arg_values[i] = (char *)arg_storage + current_offset;
 			}
+			char *storage_ptr = (char *)arg_values[i];
 
 			int is_num = aArgs ? ring_list_isdouble(aArgs, i + 1) : RING_API_ISNUMBER(param_idx);
 			int is_str = aArgs ? ring_list_isstring(aArgs, i + 1) : RING_API_ISSTRING(param_idx);
@@ -3706,13 +3733,13 @@ RING_FUNC(ring_cffi_varcall)
 						arg_types[i] = FFI_VARIADIC_INT_TYPE;
 					}
 					*(ffi_sarg *)storage_ptr = (ffi_sarg)(int)val;
-					storage_ptr += FFI_VARIADIC_INT_SIZE;
+					current_offset += FFI_VARIADIC_INT_SIZE;
 				} else {
 					if (!(i < fixed_count && func->type->param_types)) {
 						arg_types[i] = &ffi_type_double;
 					}
 					*(double *)storage_ptr = val;
-					storage_ptr += sizeof(double);
+					current_offset += sizeof(double);
 				}
 			} else if (is_str) {
 				const char *str =
@@ -3728,13 +3755,18 @@ RING_FUNC(ring_cffi_varcall)
 					} else {
 						*(int64_t *)storage_ptr = (int64_t)strtoll(str, NULL, 10);
 					}
-					storage_ptr += ptype->size;
-				} else {
-					if (!(i < fixed_count && func->type->param_types)) {
-						arg_types[i] = &ffi_type_pointer;
-					}
+					current_offset += ptype->size;
+				} else if (!(i < fixed_count && func->type->param_types)) {
+					arg_types[i] = &ffi_type_pointer;
 					*(const char **)storage_ptr = str;
-					storage_ptr += sizeof(void *);
+					current_offset += sizeof(void *);
+				} else {
+					RING_API_ERROR("ffi_varcall: type mismatch, string passed to "
+								   "non-pointer/non-64bit fixed parameter");
+					ring_state_free(ctx->ring_state, arg_types);
+					ring_state_free(ctx->ring_state, arg_values);
+					ring_state_free(ctx->ring_state, arg_storage);
+					return;
 				}
 			} else if (is_ptr) {
 				if (!(i < fixed_count && func->type->param_types)) {
@@ -3757,13 +3789,13 @@ RING_FUNC(ring_cffi_varcall)
 				}
 
 				*(void **)storage_ptr = ptr_val;
-				storage_ptr += sizeof(void *);
+				current_offset += sizeof(void *);
 			} else {
 				if (!(i < fixed_count && func->type->param_types)) {
 					arg_types[i] = FFI_VARIADIC_INT_TYPE;
 				}
 				*(ffi_sarg *)storage_ptr = 0;
-				storage_ptr += FFI_VARIADIC_INT_SIZE;
+				current_offset += FFI_VARIADIC_INT_SIZE;
 			}
 		}
 	}
