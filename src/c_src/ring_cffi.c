@@ -219,6 +219,93 @@ void ffi_set_error(FFI_Context *ctx, const char *fmt, ...)
 
 const char *ffi_get_error(FFI_Context *ctx) { return ctx->error_msg; }
 
+static char *ffi_cstring_unescape(RingState *state, const char *src)
+{
+	size_t len = strlen(src);
+	char *dst = (char *)ring_state_malloc(state, len + 1);
+	if (!dst)
+		return NULL;
+
+	char *out = dst;
+	const char *in = src;
+	while (*in) {
+		if (*in == '\\' && *(in + 1)) {
+			in++;
+			switch (*in) {
+			case 'n':
+				*out++ = '\n';
+				break;
+			case 't':
+				*out++ = '\t';
+				break;
+			case 'r':
+				*out++ = '\r';
+				break;
+			case '0':
+				*out++ = '\0';
+				break;
+			case 'a':
+				*out++ = '\a';
+				break;
+			case 'b':
+				*out++ = '\b';
+				break;
+			case 'f':
+				*out++ = '\f';
+				break;
+			case 'v':
+				*out++ = '\v';
+				break;
+			case '\\':
+				*out++ = '\\';
+				break;
+			case '\'':
+				*out++ = '\'';
+				break;
+			case '\"':
+				*out++ = '\"';
+				break;
+			case 'x': {
+				in++;
+				unsigned int val = 0;
+				for (int i = 0; i < 2 && isxdigit((unsigned char)*in); i++, in++)
+					val = (val << 4) |
+						  (isdigit((unsigned char)*in) ? (*in - '0')
+													   : (tolower((unsigned char)*in) - 'a' + 10));
+				in--;
+				*out++ = (char)val;
+				break;
+			}
+			default:
+				if (isdigit((unsigned char)*in) && *in >= '0' && *in <= '7') {
+					unsigned int val = *in - '0';
+					in++;
+					if (isdigit((unsigned char)*in) && *in >= '0' && *in <= '7') {
+						val = (val << 3) | (*in - '0');
+						in++;
+						if (isdigit((unsigned char)*in) && *in >= '0' && *in <= '7')
+							val = (val << 3) | (*in - '0');
+						else
+							in--;
+					} else {
+						in--;
+					}
+					*out++ = (char)val;
+				} else {
+					*out++ = '\\';
+					*out++ = *in;
+				}
+				break;
+			}
+		} else {
+			*out++ = *in;
+		}
+		in++;
+	}
+	*out = '\0';
+	return dst;
+}
+
 FFI_Library *ffi_library_open(FFI_Context *ctx, const char *path)
 {
 	FFI_LibHandle handle = FFI_LoadLib(path);
@@ -476,13 +563,8 @@ char *ffi_string_new(FFI_Context *ctx, const char *str)
 {
 	if (!str)
 		return NULL;
-	size_t len = strlen(str);
-	char *copy = (char *)ring_state_malloc(ctx->ring_state, len + 1);
-	if (copy) {
-		memcpy(copy, str, len);
-		copy[len] = '\0';
-	}
-	return copy;
+	char *result = ffi_cstring_unescape(ctx->ring_state, str);
+	return result ? result : NULL;
 }
 
 static double ffi_read_typed_value(void *src, FFI_Type *type)
@@ -1523,7 +1605,9 @@ static int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List
 						ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
 						ptr_type = ring_list_getstring(argList, RING_CPOINTER_TYPE);
 					} else if (ring_list_isstring(aArgs, i + 1)) {
-						ptr_val = (void *)ring_list_getstring(aArgs, i + 1);
+						char *unescaped = ffi_cstring_unescape(ctx->ring_state,
+															   ring_list_getstring(aArgs, i + 1));
+						ptr_val = unescaped ? unescaped : (void *)ring_list_getstring(aArgs, i + 1);
 					} else if (ring_list_isdouble(aArgs, i + 1) &&
 							   ring_list_getdouble(aArgs, i + 1) == 0) {
 						ptr_val = NULL;
@@ -1537,7 +1621,10 @@ static int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List
 						ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
 						ptr_type = ring_list_getstring(argList, RING_CPOINTER_TYPE);
 					} else if (ring_vm_api_isstring((void *)pVM, param_idx)) {
-						ptr_val = (void *)ring_vm_api_getstring((void *)pVM, param_idx);
+						char *unescaped = ffi_cstring_unescape(
+							ctx->ring_state, ring_vm_api_getstring((void *)pVM, param_idx));
+						ptr_val = unescaped ? unescaped
+											: (void *)ring_vm_api_getstring((void *)pVM, param_idx);
 					} else if (ring_vm_api_isnumber((void *)pVM, param_idx) &&
 							   ring_vm_api_getnumber((void *)pVM, param_idx) == 0) {
 						ptr_val = NULL;
@@ -1573,6 +1660,11 @@ static int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List
 						*(int64_t *)storage_ptr = (int64_t)strtoll(str, NULL, 10);
 					}
 					current_offset += ptype->size;
+				} else if (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0) {
+					char *unescaped = ffi_cstring_unescape(ctx->ring_state, str);
+					*(const char **)storage_ptr = unescaped ? unescaped : str;
+					current_offset += sizeof(void *);
+					current_offset = FFI_ALIGN(current_offset, 16);
 				} else {
 					ring_vm_error(
 						pVM, "type mismatch, string passed to non-pointer/non-64bit parameter");
@@ -3794,9 +3886,16 @@ RING_FUNC(ring_cffi_varcall)
 						*(int64_t *)storage_ptr = (int64_t)strtoll(str, NULL, 10);
 					}
 					current_offset += ptype->size;
+				} else if (i < fixed_count && func->type->param_types &&
+						   (func->type->param_types[i]->kind == FFI_KIND_POINTER ||
+							func->type->param_types[i]->pointer_depth > 0)) {
+					char *unescaped = ffi_cstring_unescape(ctx->ring_state, str);
+					*(const char **)storage_ptr = unescaped ? unescaped : str;
+					current_offset += sizeof(void *);
 				} else if (!(i < fixed_count && func->type->param_types)) {
 					arg_types[i] = &ffi_type_pointer;
-					*(const char **)storage_ptr = str;
+					char *unescaped = ffi_cstring_unescape(ctx->ring_state, str);
+					*(const char **)storage_ptr = unescaped ? unescaped : str;
 					current_offset += sizeof(void *);
 				} else {
 					RING_API_ERROR("ffi_varcall: type mismatch, string passed to "
