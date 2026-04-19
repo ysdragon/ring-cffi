@@ -3271,6 +3271,10 @@ static void cparser_type(CParser *p, char *out, size_t sz)
 		cparser_skip_attributes(p);
 	}
 	out[i] = '\0';
+
+	if ((has_struct || has_union) && strchr(out, '*')) {
+		snprintf(out, sz, "ptr");
+	}
 }
 
 static bool cparser_parse_struct(CParser *p, bool is_union)
