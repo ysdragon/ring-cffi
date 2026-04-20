@@ -1,6 +1,6 @@
 /*
  * Example 04: Pointer Operations (C API)
- * API: cffi_nullptr, cffi_isnull, cffi_deref, cffi_offset, cffi_get, cffi_set
+ * API: cffi_nullptr, cffi_isnull, cffi_deref, cffi_offset, cffi_get, cffi_set, cffi_cast
  */
 load "cffi.ring"
 
@@ -29,6 +29,14 @@ cVal = "9223372036854775807" # Max int64
 cffi_set_i64(pI64, cVal)
 ? "Set i64: " + cVal
 ? "Get i64: " + cffi_get_i64(pI64)
+
+# Safe pointer casting
+? nl + "--- Pointer Cast ---"
+pBuf = cffi_new("char", 8)
+pAsInt = cffi_cast(pBuf, "int")
+cffi_set(pAsInt, "int", 0x41424344)
+? "cast to int: 0x" + hex(cffi_get(pAsInt, "int"))
+? "original char: " + cffi_get(pBuf, "char")
 
 func getLibcPath
     if isWindows()
