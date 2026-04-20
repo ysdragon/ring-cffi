@@ -57,6 +57,9 @@ jobs:
     needs: [ alpine, freebsd, macos, ubuntu, windows ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
 
+    outputs:
+      head_sha: ${{ steps.push.outputs.head_sha }}
+
     permissions:
       contents: write
 
@@ -79,6 +82,7 @@ jobs:
         done
 
     - name: Commit and push changes
+      id: push
       run: |
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
@@ -89,6 +93,7 @@ jobs:
         else
           echo "No library changes to commit."
         fi
+        echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -101,6 +106,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v6
+      with:
+        ref: ${{ needs.update-libs.outputs.head_sha }}
 
     - name: Run tests
       uses: ysdragon/ring-action@v1
