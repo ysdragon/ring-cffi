@@ -56,6 +56,7 @@ typedef enum {
 	FFI_KIND_DOUBLE,
 	FFI_KIND_LONGDOUBLE,
 	FFI_KIND_POINTER,
+	FFI_KIND_STRING,
 	FFI_KIND_STRUCT,
 	FFI_KIND_UNION,
 	FFI_KIND_FUNCTION,
@@ -311,6 +312,8 @@ char *ffi_string_new(FFI_Context *ctx, const char *str);
 #define FFI_ALIGN(size, alignment) (((size) + (alignment) - 1) & ~((alignment) - 1))
 
 #define FFI_BITFIELD_TYPE_TAG "BF"
+
+#define FFI_IS_POINTER_TYPE(t) ((t)->kind == FFI_KIND_POINTER || (t)->kind == FFI_KIND_STRING || (t)->pointer_depth > 0)
 
 #ifdef _WIN64
 #define FFI_VARIADIC_INT_TYPE &ffi_type_sint64

@@ -63,6 +63,7 @@ static ffi_type *ffi_get_primitive_type(FFI_TypeKind kind)
 		return &ffi_type_double;
 	case FFI_KIND_LONGDOUBLE:
 		return &ffi_type_longdouble;
+	case FFI_KIND_STRING:
 	case FFI_KIND_POINTER:
 		return &ffi_type_pointer;
 	case FFI_KIND_BOOL:
@@ -154,6 +155,7 @@ static size_t ffi_get_primitive_size(FFI_TypeKind kind)
 		return sizeof(long);
 	case FFI_KIND_ULONG:
 		return sizeof(unsigned long);
+	case FFI_KIND_STRING:
 	case FFI_KIND_POINTER:
 		return sizeof(void *);
 	case FFI_KIND_WCHAR_T:
@@ -621,7 +623,7 @@ char *ffi_string_new(FFI_Context *ctx, const char *str)
 
 static double ffi_read_typed_value(void *src, FFI_Type *type)
 {
-	if (type->kind == FFI_KIND_POINTER || type->pointer_depth > 0) {
+	if (FFI_IS_POINTER_TYPE(type)) {
 		return (double)(uintptr_t)*(void **)src;
 	}
 	switch (type->kind) {
@@ -673,7 +675,7 @@ static double ffi_read_typed_value(void *src, FFI_Type *type)
 
 static void ffi_write_typed_value(void *dst, FFI_Type *type, double val)
 {
-	if (type->kind == FFI_KIND_POINTER || type->pointer_depth > 0) {
+	if (FFI_IS_POINTER_TYPE(type)) {
 		*(void **)dst = (void *)(uintptr_t)val;
 		return;
 	}
@@ -742,7 +744,13 @@ static void ffi_push_to_ring(VM *vm, void *src, FFI_Type *type, bool is_ffi_arg)
 {
 	if (type->kind == FFI_KIND_VOID) {
 		ring_vm_api_retnumber(vm, 0);
-	} else if (type->kind == FFI_KIND_POINTER || type->pointer_depth > 0) {
+	} else if (type->kind == FFI_KIND_STRING && type->pointer_depth == 0) {
+		char *str_val = *(char **)src;
+		if (str_val)
+			ring_vm_api_retstring(vm, str_val);
+		else
+			ring_vm_api_retcpointer(vm, NULL, "FFI_Ptr");
+	} else if (FFI_IS_POINTER_TYPE(type)) {
 		ring_vm_api_retcpointer(vm, *(void **)src, "FFI_Ptr");
 	} else if (ffi_is_64bit_int(type->kind)) {
 		uint64_t uval;
@@ -1159,7 +1167,15 @@ RING_FUNC(ring_cffi_string)
 
 RING_FUNC(ring_cffi_tostring)
 {
-	if (RING_API_PARACOUNT != 1 || !RING_API_ISCPOINTER(1)) {
+	if (RING_API_PARACOUNT != 1) {
+		RING_API_ERROR("ffi_tostring(ptr) expects a pointer");
+		return;
+	}
+	if (RING_API_ISSTRING(1)) {
+		RING_API_RETSTRING(RING_API_GETSTRING(1));
+		return;
+	}
+	if (!RING_API_ISCPOINTER(1)) {
 		RING_API_ERROR("ffi_tostring(ptr) expects a pointer");
 		return;
 	}
@@ -1265,7 +1281,7 @@ static FFI_TypeKind parse_type_kind(const char *name)
 	if (strcmp(name, "pointer") == 0 || strcmp(name, "void*") == 0 || strcmp(name, "ptr") == 0)
 		return FFI_KIND_POINTER;
 	if (strcmp(name, "char*") == 0 || strcmp(name, "string") == 0 || strcmp(name, "cstring") == 0)
-		return FFI_KIND_POINTER;
+		return FFI_KIND_STRING;
 
 	return FFI_KIND_UNKNOWN;
 }
@@ -1653,7 +1669,7 @@ static int ffi_store_arg(FFI_Context *ctx, VM *pVM, List *aArgs, int i, int para
 	int is_ptr =
 		aArgs ? ring_list_islist(aArgs, i + 1) : ring_vm_api_iscpointer((void *)pVM, param_idx);
 
-	if (ptype && (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0)) {
+	if (ptype && FFI_IS_POINTER_TYPE(ptype)) {
 		void *ptr_val = NULL;
 		const char *ptr_type = NULL;
 		if (aArgs) {
@@ -1737,7 +1753,7 @@ static int ffi_store_arg(FFI_Context *ctx, VM *pVM, List *aArgs, int i, int para
 				*(int64_t *)storage_ptr = (int64_t)strtoll(str, NULL, 10);
 			}
 			*out_size = ptype->size;
-		} else if (ptype && (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0)) {
+		} else if (ptype && FFI_IS_POINTER_TYPE(ptype)) {
 			char *unescaped = ffi_cstring_unescape(ctx->ring_state, str);
 			if (unescaped)
 				ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, unescaped,
@@ -1819,7 +1835,7 @@ static int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List
 		for (int i = 0; i < arg_count; i++) {
 			FFI_Type *ptype = func->type->param_types[i];
 			storage_size = FFI_ALIGN(storage_size, ptype->alignment > 0 ? ptype->alignment : 1);
-			if (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0) {
+			if (FFI_IS_POINTER_TYPE(ptype)) {
 				storage_size += sizeof(void *);
 				storage_size = FFI_ALIGN(storage_size, 16);
 			} else {
@@ -1857,7 +1873,7 @@ static int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List
 				goto cleanup;
 
 			current_offset += wrote;
-			if (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0)
+			if (FFI_IS_POINTER_TYPE(ptype))
 				current_offset = FFI_ALIGN(current_offset, 16);
 		}
 	}
@@ -1928,7 +1944,7 @@ static int ffi_call_variadic(FFI_Context *ctx, VM *pVM, FFI_Function *func, List
 			if (i < fixed_count && func->type->param_types) {
 				FFI_Type *ptype = func->type->param_types[i];
 				storage_size = FFI_ALIGN(storage_size, ptype->alignment > 0 ? ptype->alignment : 1);
-				if (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0) {
+				if (FFI_IS_POINTER_TYPE(ptype)) {
 					storage_size += sizeof(void *);
 					storage_size = FFI_ALIGN(storage_size, 16);
 				} else {
@@ -1988,8 +2004,7 @@ static int ffi_call_variadic(FFI_Context *ctx, VM *pVM, FFI_Function *func, List
 				arg_types[i] = inferred_ffi_type;
 
 			current_offset += wrote;
-			if ((ptype && (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0)) ||
-				(!ptype && wrote == sizeof(void *)))
+			if ((ptype && FFI_IS_POINTER_TYPE(ptype)) || (!ptype && wrote == sizeof(void *)))
 				current_offset = FFI_ALIGN(current_offset, 16);
 		}
 	}
@@ -2230,7 +2245,13 @@ RING_FUNC(ring_cffi_get)
 
 	void *elem_ptr = (char *)ptr + (index * type->size);
 
-	if (type->kind == FFI_KIND_POINTER || type->pointer_depth > 0) {
+	if (type->kind == FFI_KIND_STRING && type->pointer_depth == 0) {
+		char *str_val = *(char **)elem_ptr;
+		if (str_val)
+			ring_vm_api_retstring((VM *)pPointer, str_val);
+		else
+			ring_vm_api_retcpointer((VM *)pPointer, NULL, "FFI_Ptr");
+	} else if (FFI_IS_POINTER_TYPE(type)) {
 		void *val = *(void **)elem_ptr;
 		RING_API_RETCPOINTER(val, "FFI_Ptr");
 	} else {
@@ -2287,7 +2308,7 @@ RING_FUNC(ring_cffi_set)
 
 	void *elem_ptr = (char *)ptr + (index * type->size);
 
-	if (type->kind == FFI_KIND_POINTER || type->pointer_depth > 0) {
+	if (FFI_IS_POINTER_TYPE(type)) {
 		void *val = NULL;
 		if (RING_API_ISCPOINTER(3)) {
 			List *valList = RING_API_GETLIST(3);
@@ -2400,7 +2421,13 @@ RING_FUNC(ring_cffi_deref)
 			return;
 		}
 
-		if (type->kind == FFI_KIND_POINTER || type->pointer_depth > 0) {
+		if (type->kind == FFI_KIND_STRING && type->pointer_depth == 0) {
+			char *str_val = *(char **)ptr;
+			if (str_val)
+				RING_API_RETSTRING(str_val);
+			else
+				RING_API_RETCPOINTER(NULL, "FFI_Ptr");
+		} else if (FFI_IS_POINTER_TYPE(type)) {
 			void *derefed = *(void **)ptr;
 			RING_API_RETCPOINTER(derefed, "FFI_Ptr");
 		} else {
@@ -2805,7 +2832,13 @@ static void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *use
 	for (int i = 0; i < cif->nargs; i++) {
 		FFI_Type *ptype = ftype->param_types[i];
 
-		if (ptype->kind == FFI_KIND_POINTER || ptype->pointer_depth > 0) {
+		if (ptype->kind == FFI_KIND_STRING && ptype->pointer_depth == 0) {
+			char *str_val = *(char **)args[i];
+			if (str_val)
+				ring_list_addstring_gc(state, current_args, str_val);
+			else
+				ring_list_addcpointer_gc(state, current_args, NULL, "FFI_Ptr");
+		} else if (FFI_IS_POINTER_TYPE(ptype)) {
 			void *val = *(void **)args[i];
 			ring_list_addcpointer_gc(state, current_args, val, "FFI_Ptr");
 		} else if (ffi_is_64bit_int(ptype->kind)) {
