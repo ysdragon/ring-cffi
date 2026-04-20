@@ -21,16 +21,17 @@
 
 -   🔌 **Dynamic Library Loading**: Load shared libraries (.so, .dll, .dylib) at runtime
 -   📞 **C Function Calls**: Call C functions directly from Ring with automatic type conversion
--   🔢 **Pointer Operations**: Pointer arithmetic, dereferencing, read/write access
--   🏗️ **Struct Support**: Define and manipulate C structs with named field access
+-   🔢 **Pointer Operations**: Pointer arithmetic, dereferencing, read/write access, safe type casting
+-   🏗️ **Struct Support**: Define and manipulate C structs with named field access and nested dot notation
 -   🔗 **Union Support**: Define and use C unions
 -   🔢 **Enum Support**: Define and access C enumerations
 -   🔄 **Callbacks**: Pass Ring functions as C callbacks
 -   🧠 **Memory Management**: Allocate and manage C memory directly
--   📝 **C String Handling**: Seamless conversion between Ring and C strings
+-   📝 **C String Handling**: Seamless conversion between Ring and C strings, string arrays (`char**`), wide strings (`wchar_t*`)
 -   🌍 **Cross-Platform**: Works on Windows, Linux, macOS, and FreeBSD
 -   ⚡ **High-Level OOP API**: Clean `FFI` class with intuitive method names
 -   🔗 **Dynamic Binding**: Bind C functions as native Ring functions/methods
+-   🎚️ **Bitfield Support**: Read and write C bitfields with correct bit-level masking
 
 ## 📥 Installation
 
@@ -114,6 +115,83 @@ new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
 
     # Read it back
     ? toString(cStr)  # "Hello from Ring!"
+
+    # Build a string array (char**) for argv-style C APIs
+    ppArgs = stringArray(["hello", "world", "test"])
+    # ppArgs is a NULL-terminated char** — pass to exec/spawn/etc.
+
+    # Wide string support (wchar_t*) — essential for Win32 API
+    pWide = wstring("Hello UTF-16!")
+    ? wtoString(pWide)  # "Hello UTF-16!" — roundtrip preserved
+}
+```
+
+### Safe Pointer Casting
+
+```ring
+load "cffi.ring"
+
+new FFI {
+    # Allocate raw memory
+    pBuf = alloc("char", 8)
+
+    # Cast the same address to a different type
+    pAsInt = cast(pBuf, "int")
+    ptrSet(pAsInt, "int", 0x41424344)
+
+    # The raw bytes are shared — reading as char sees the int's bytes
+    ? ptrGet(pBuf, "char")  # 68 ('D' on little-endian)
+}
+```
+
+### Nested Struct Field Access (Dot Notation)
+
+```ring
+load "cffi.ring"
+
+new FFI {
+    # Define inner and outer structs
+    oVec = defineStruct("Vec2", [["x", "int"], ["y", "int"]])
+    oEnt = defineStruct("Entity", [["id", "int"], ["pos", "Vec2"]])
+
+    pEnt = structNew(oEnt)
+
+    # Access nested fields with dot notation — no manual offset chaining
+    ptrSet(field(pEnt, oEnt, "id"), "int", 1)
+    ptrSet(field(pEnt, oEnt, "pos.x"), "int", 50)
+    ptrSet(field(pEnt, oEnt, "pos.y"), "int", 75)
+
+    ? ptrGet(field(pEnt, oEnt, "pos.x"), "int")  # 50
+    ? fieldOffset(oEnt, "pos.x")                  # cumulative offset
+}
+```
+
+### Bitfield Read/Write
+
+```ring
+load "cffi.ring"
+
+new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+    cdef("
+        struct Flags {
+            unsigned int a : 3;  # 0–7
+            unsigned int b : 5;  # 0–31
+            unsigned int c : 4;  # 0–15
+            int normal;
+        };
+    ")
+
+    fType = cffi_typeof("Flags")
+    pF = structNew(fType)
+
+    ptrSet(field(pF, fType, "a"), "int", 5)
+    ptrSet(field(pF, fType, "b"), "int", 17)
+    ptrSet(field(pF, fType, "c"), "int", 9)
+
+    ? ptrGet(field(pF, fType, "a"), "int")  # 5
+    # Writing one bitfield doesn't corrupt adjacent ones
+    ptrSet(field(pF, fType, "b"), "int", 1)
+    ? ptrGet(field(pF, fType, "a"), "int")  # 5 (still intact)
 }
 ```
 
@@ -336,16 +414,20 @@ ffi = new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
 | `deref(pPtr)` | `pPtr`: pointer — pointer to dereference | Dereference a pointer, returning the pointed-to pointer |
 | `derefTyped(pPtr, cType)` | `pPtr`: pointer — pointer to dereference, `cType`: string — type name | Dereference a pointer with explicit type |
 | `offset(pPtr, nOffset)` | `pPtr`: pointer — base pointer, `nOffset`: number — byte offset | Offset a pointer by bytes |
+| `cast(pPtr, cType)` | `pPtr`: pointer — existing pointer, `cType`: string — new type label | Cast pointer to a new type (same address) |
 | `invoke(oFunc, [aArgs])` | `oFunc`: pointer — function wrapper, `aArgs`: list (optional) — arguments | Call a C function wrapper |
 | `varcall(oFunc, [aArgs])` | `oFunc`: pointer — variadic function wrapper, `aArgs`: list (optional) — arguments | Call a variadic function wrapper |
 | `fieldPtr(pStruct, oStruct, cField)` | `pStruct`: pointer — struct instance, `oStruct`: pointer — struct definition, `cField`: string — field name | Get pointer to struct field |
 | `toString(pPtr)` | `pPtr`: pointer — C string pointer | Read null-terminated C string |
 | `string(cString)` | `cString`: string — Ring string | Create C string from Ring string |
+| `stringArray(aStrings)` | `aStrings`: list — list of Ring strings | Create NULL-terminated `char**` array |
+| `wstring(cString)` | `cString`: string — Ring string (UTF-8) | Convert to `wchar_t*` (UTF-16 on Windows) |
+| `wtoString(pPtr)` | `pPtr`: pointer — `wchar_t*` pointer | Read `wchar_t*` and convert to Ring string (UTF-8) |
 | `sym(cName)` | `cName`: string — symbol name | Look up symbol in loaded library |
 | `defineStruct(cName, aFields)` | `cName`: string — struct name, `aFields`: list — field definitions `[["name", "type"], ...]` | Define a C struct |
 | `structNew(oStruct)` | `oStruct`: pointer — struct definition | Allocate struct instance |
-| `field(pStruct, oStruct, cField)` | `pStruct`: pointer — struct instance, `oStruct`: pointer — struct definition, `cField`: string — field name | Get pointer to struct field |
-| `fieldOffset(oStruct, cField)` | `oStruct`: pointer — struct definition, `cField`: string — field name | Get byte offset of field |
+| `field(pStruct, oStruct, cField)` | `pStruct`: pointer — struct instance, `oStruct`: pointer — struct definition, `cField`: string — field name (supports dot notation: `"pos.x"`) | Get pointer to struct field |
+| `fieldOffset(oStruct, cField)` | `oStruct`: pointer — struct definition, `cField`: string — field name (supports dot notation: `"pos.x"`) | Get byte offset of field (cumulative for nested) |
 | `structSize(oStruct)` | `oStruct`: pointer — struct definition | Get struct size in bytes |
 | `defineUnion(cName, aFields)` | `cName`: string — union name, `aFields`: list — field definitions `[["name", "type"], ...]` | Define a C union |
 | `unionNew(oUnion)` | `oUnion`: pointer — union definition | Allocate union instance |
@@ -388,8 +470,8 @@ These are the underlying native C extension functions exposed to Ring via `RING_
 | `cffi_struct(cName, [aFields])` | `cName`: string — struct name, `aFields`: list (optional) — field definitions `[["name", "type"], ...]` | Define a C struct |
 | `cffi_typeof(cName)` | `cName`: string — type/struct/union/enum name | Get type handle by name |
 | `cffi_struct_new(pType)` | `pType`: pointer — struct definition | Allocate struct instance |
-| `cffi_field(pPtr, pType, cField)` | `pPtr`: pointer — struct/union instance, `pType`: pointer — type definition, `cField`: string — field name | Get pointer to struct field |
-| `cffi_field_offset(pType, cField)` | `pType`: pointer — struct type, `cField`: string — field name | Get byte offset of field |
+| `cffi_field(pPtr, pType, cField)` | `pPtr`: pointer — struct/union instance, `pType`: pointer — type definition, `cField`: string — field name (supports dot notation: `"pos.x"`) | Get pointer to struct field |
+| `cffi_field_offset(pType, cField)` | `pType`: pointer — struct/union type, `cField`: string — field name (supports dot notation: `"pos.x"`) | Get byte offset of field |
 | `cffi_struct_size(pType)` | `pType`: pointer — struct type | Get struct size in bytes |
 | `cffi_callback(cFunc, cRetType, [aArgTypes])` | `cFunc`: string — Ring function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Create C callback |
 | `cffi_enum(cName, aConsts)` | `cName`: string — enum name, `aConsts`: list — constant definitions `[["NAME", value], ...]` | Define a C enum |
@@ -401,6 +483,10 @@ These are the underlying native C extension functions exposed to Ring via `RING_
 | `cffi_varcall(oFunc, [aArgs])` | `oFunc`: pointer — variadic function handle, `aArgs`: list (optional) — arguments | Call a variadic function wrapper |
 | `cffi_cdef(pLib, cDeclarations)` | `pLib`: pointer — library handle (can be NULL), `cDeclarations`: string — C definition source | Parse C definition string |
 | `cffi_bind([pLib, cName, cRetType, aArgTypes])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings. **No args** = bind all cdef functions | Bind C function(s) as native Ring function(s) |
+| `cffi_cast(pPtr, cType)` | `pPtr`: pointer — existing pointer, `cType`: string — new type label | Cast pointer to new type (same address, new label) |
+| `cffi_string_array(aStrings)` | `aStrings`: list — list of Ring strings | Create NULL-terminated `char**` array |
+| `cffi_wstring(cStr)` | `cStr`: string — Ring string (UTF-8) | Convert to `wchar_t*` buffer |
+| `cffi_wtostring(pPtr)` | `pPtr`: pointer — `wchar_t*` pointer | Convert `wchar_t*` to Ring string (UTF-8) |
 
 ### Supported C Types
 
@@ -474,11 +560,11 @@ Check the [`examples/`](examples/) directory for usage examples covering:
 | 01 | 📥 Library Loading | `cffi_load` — loading shared libraries |
 | 02 | 📞 Function Calls | `cffi_func` — calling C functions |
 | 03 | 💾 Memory Allocation | `cffi_new` — allocating C memory |
-| 04 | 🔢 Pointer Operations | `cffi_get`, `cffi_set`, `cffi_deref`, `cffi_offset` |
-| 05 | 📝 C Strings | `cffi_string`, `cffi_tostring` — string handling |
+| 04 | 🔢 Pointer Operations | `cffi_get`, `cffi_set`, `cffi_deref`, `cffi_offset`, `cffi_cast` |
+| 05 | 📝 C Strings | `cffi_string`, `cffi_tostring`, `cffi_string_array`, `cffi_wstring`, `cffi_wtostring` |
 | 06 | 🔍 Symbol Lookup | `cffi_sym` — resolving library symbols |
 | 07 | 🎯 Function Pointers | `cffi_funcptr` — wrapping raw function pointers |
-| 08 | 🏗️ Structs | `cffi_struct`, `cffi_struct_new`, `cffi_field` — C structs |
+| 08 | 🏗️ Structs | `cffi_struct`, `cffi_struct_new`, `cffi_field` — C structs, nested dot notation, bitfields |
 | 09 | 🔗 Unions | `cffi_union`, `cffi_union_new` — C unions |
 | 10 | 🔢 Enums | `cffi_enum`, `cffi_enum_value` — C enumerations |
 | 11 | 🔄 Callbacks | `cffi_callback` — Ring functions as C callbacks |
