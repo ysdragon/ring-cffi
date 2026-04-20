@@ -8,9 +8,13 @@
 #define RING_CFFI_H
 
 #include "ring.h"
+#include <errno.h>
 #include <ffi.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <wchar.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -83,6 +87,8 @@ typedef struct FFI_StructField {
 	FFI_Type *type;
 	size_t offset;
 	size_t size;
+	size_t bit_width;
+	size_t bit_offset;
 	struct FFI_StructField *next;
 } FFI_StructField;
 
@@ -271,7 +277,10 @@ size_t ffi_sizeof(FFI_Type *type);
  * ============================================================ */
 
 FFI_StructType *ffi_struct_define(FFI_Context *ctx, const char *name);
-int ffi_struct_add_field(FFI_Context *ctx, FFI_StructType *st, const char *name, FFI_Type *type);
+int ffi_struct_add_field(FFI_Context *ctx, FFI_StructType *st, const char *name, FFI_Type *type,
+						 size_t bit_width);
+int ffi_struct_add_field_full(FFI_Context *ctx, FFI_StructType *st, const char *name,
+							  FFI_Type *type, size_t bit_width);
 int ffi_struct_finalize(FFI_Context *ctx, FFI_StructType *st);
 
 int ffi_union_add_field(FFI_Context *ctx, FFI_UnionType *ut, const char *name, FFI_Type *type);
@@ -300,6 +309,8 @@ char *ffi_string_new(FFI_Context *ctx, const char *str);
  * ============================================================ */
 
 #define FFI_ALIGN(size, alignment) (((size) + (alignment) - 1) & ~((alignment) - 1))
+
+#define FFI_BITFIELD_TYPE_TAG "BF"
 
 #ifdef _WIN64
 #define FFI_VARIADIC_INT_TYPE &ffi_type_sint64

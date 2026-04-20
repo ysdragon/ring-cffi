@@ -9,8 +9,6 @@
 #endif
 
 #include "ring_cffi.h"
-#include <errno.h>
-#include <stdarg.h>
 
 static void ffi_gc_free_struct_type(void *state, void *ptr);
 static void ffi_gc_free_union_type(void *state, void *ptr);
@@ -393,7 +391,8 @@ FFI_StructType *ffi_struct_define(FFI_Context *ctx, const char *name)
 	return st;
 }
 
-int ffi_struct_add_field(FFI_Context *ctx, FFI_StructType *st, const char *name, FFI_Type *type)
+int ffi_struct_add_field(FFI_Context *ctx, FFI_StructType *st, const char *name, FFI_Type *type,
+						 size_t bit_width)
 {
 	if (!st || !name || !type)
 		return -1;
@@ -408,6 +407,7 @@ int ffi_struct_add_field(FFI_Context *ctx, FFI_StructType *st, const char *name,
 	if (field->name)
 		strcpy(field->name, name);
 	field->type = type;
+	field->bit_width = bit_width;
 
 	if (!st->fields) {
 		st->fields = field;
@@ -420,6 +420,12 @@ int ffi_struct_add_field(FFI_Context *ctx, FFI_StructType *st, const char *name,
 	st->field_count++;
 
 	return 0;
+}
+
+int ffi_struct_add_field_full(FFI_Context *ctx, FFI_StructType *st, const char *name,
+							  FFI_Type *type, size_t bit_width)
+{
+	return ffi_struct_add_field(ctx, st, name, type, bit_width);
 }
 
 int ffi_struct_finalize(FFI_Context *ctx, FFI_StructType *st)
@@ -440,28 +446,70 @@ int ffi_struct_finalize(FFI_Context *ctx, FFI_StructType *st)
 		return -1;
 
 	FFI_StructField *field = st->fields;
-	size_t offset = 0;
+	size_t byte_offset = 0;
+	size_t bit_pos = 0;
 	size_t max_align = 1;
-	int i = 0;
+	size_t current_bf_unit_size = 0;
+	int ffi_idx = 0;
 
-	while (field && i < count) {
-		size_t align = field->type->alignment;
-		if (align > max_align)
-			max_align = align;
+	while (field && ffi_idx < count) {
+		if (field->bit_width > 0) {
+			size_t unit_bits = field->type->size * 8;
+			size_t field_align = field->type->alignment;
 
-		offset = FFI_ALIGN(offset, align);
-		field->offset = offset;
-		field->size = field->type->size;
-		offset += field->size;
+			if (field_align > max_align)
+				max_align = field_align;
 
-		st->ffi_elements[i] = field->type->ffi_type_ptr;
+			if (bit_pos > 0 && (bit_pos + field->bit_width) > unit_bits) {
+				byte_offset += current_bf_unit_size;
+				bit_pos = 0;
+			}
+
+			if (bit_pos == 0) {
+				byte_offset = FFI_ALIGN(byte_offset, field_align);
+				current_bf_unit_size = field->type->size;
+			}
+
+			field->offset = byte_offset;
+			field->size = field->type->size;
+			field->bit_offset = bit_pos;
+			bit_pos += field->bit_width;
+
+			while (bit_pos >= unit_bits) {
+				byte_offset += current_bf_unit_size;
+				bit_pos -= unit_bits;
+			}
+
+			st->ffi_elements[ffi_idx] = field->type->ffi_type_ptr;
+		} else {
+			if (bit_pos > 0) {
+				byte_offset += current_bf_unit_size;
+				bit_pos = 0;
+			}
+
+			size_t align = field->type->alignment;
+			if (align > max_align)
+				max_align = align;
+
+			byte_offset = FFI_ALIGN(byte_offset, align);
+			field->offset = byte_offset;
+			field->size = field->type->size;
+			byte_offset += field->size;
+
+			st->ffi_elements[ffi_idx] = field->type->ffi_type_ptr;
+		}
 		field = field->next;
-		i++;
+		ffi_idx++;
 	}
 	st->ffi_elements[count] = NULL;
 
+	if (bit_pos > 0) {
+		byte_offset += current_bf_unit_size;
+		bit_pos = 0;
+	}
+
 	st->alignment = max_align;
-	st->size = FFI_ALIGN(offset, max_align);
+	st->size = FFI_ALIGN(byte_offset, max_align);
 
 	st->ffi_type_def.size = 0;
 	st->ffi_type_def.alignment = 0;
@@ -492,6 +540,8 @@ int ffi_union_add_field(FFI_Context *ctx, FFI_UnionType *ut, const char *name, F
 	field->type = type;
 	field->offset = 0;
 	field->size = type->size;
+	field->bit_width = 0;
+	field->bit_offset = 0;
 
 	if (!ut->fields) {
 		ut->fields = field;
@@ -1105,10 +1155,8 @@ RING_FUNC(ring_cffi_tostring)
 
 	List *pList = RING_API_GETLIST(1);
 	char *ptr = (char *)ring_list_getpointer(pList, RING_CPOINTER_POINTER);
-	if (!ptr) {
-		RING_API_RETSTRING("");
+	if (!ptr)
 		return;
-	}
 
 	RING_API_RETSTRING(ptr);
 }
@@ -1260,10 +1308,46 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 
 	FFI_TypeKind kind = parse_type_kind(p);
 	if (kind == FFI_KIND_UNKNOWN) {
+		FFI_StructType *st_lookup = (FFI_StructType *)ring_hashtable_findpointer(ctx->structs, p);
+		if (st_lookup) {
+			kind = FFI_KIND_STRUCT;
+		} else {
+			FFI_UnionType *ut_lookup = (FFI_UnionType *)ring_hashtable_findpointer(ctx->unions, p);
+			if (ut_lookup) {
+				kind = FFI_KIND_UNION;
+			}
+		}
+	}
+	if (kind == FFI_KIND_UNKNOWN) {
 		ffi_set_error(ctx, "Unknown type: '%s'", type_str);
 		return NULL;
 	}
-	FFI_Type *base = ffi_type_primitive(ctx, kind);
+	FFI_Type *base;
+	if (kind == FFI_KIND_STRUCT) {
+		FFI_StructType *st_found = (FFI_StructType *)ring_hashtable_findpointer(ctx->structs, p);
+		base = (FFI_Type *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Type));
+		if (!base)
+			return NULL;
+		memset(base, 0, sizeof(FFI_Type));
+		base->kind = FFI_KIND_STRUCT;
+		base->info.struct_type = st_found;
+		base->ffi_type_ptr = &st_found->ffi_type_def;
+		base->size = st_found->size;
+		base->alignment = st_found->alignment;
+	} else if (kind == FFI_KIND_UNION) {
+		FFI_UnionType *ut_found = (FFI_UnionType *)ring_hashtable_findpointer(ctx->unions, p);
+		base = (FFI_Type *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Type));
+		if (!base)
+			return NULL;
+		memset(base, 0, sizeof(FFI_Type));
+		base->kind = FFI_KIND_UNION;
+		base->info.union_type = ut_found;
+		base->ffi_type_ptr = &ffi_type_void;
+		base->size = ut_found->size;
+		base->alignment = ut_found->alignment;
+	} else {
+		base = ffi_type_primitive(ctx, kind);
+	}
 
 	FFI_Type *result = base;
 	if (ptr_count > 0) {
@@ -2017,6 +2101,51 @@ RING_FUNC(ring_cffi_get)
 		return;
 	}
 
+	const char *ptr_type = ring_list_getstring(pList, RING_CPOINTER_TYPE);
+	if (ptr_type && strncmp(ptr_type, FFI_BITFIELD_TYPE_TAG "_", 3) == 0) {
+		int kind_val = 0, bit_off = 0, bit_w = 0;
+		if (sscanf(ptr_type + 3, "%d_%d_%d", &kind_val, &bit_off, &bit_w) == 3 && bit_w > 0) {
+			FFI_TypeKind bf_kind = (FFI_TypeKind)kind_val;
+			FFI_Type *bf_type = ffi_type_primitive(ctx, bf_kind);
+			if (!bf_type) {
+				RING_API_ERROR("ffi_get: bitfield type unknown");
+				return;
+			}
+			uint64_t raw = 0;
+			if (bf_type->size == 1)
+				raw = *(uint8_t *)ptr;
+			else if (bf_type->size == 2)
+				raw = *(uint16_t *)ptr;
+			else if (bf_type->size == 4)
+				raw = *(uint32_t *)ptr;
+			else if (bf_type->size == 8)
+				raw = *(uint64_t *)ptr;
+			uint64_t mask = (bit_w >= 64) ? ~(uint64_t)0 : ((uint64_t)1 << bit_w) - 1;
+			uint64_t val = (raw >> bit_off) & mask;
+			if (ffi_is_64bit_int(bf_kind)) {
+				char buf[32];
+				if (bf_kind == FFI_KIND_UINT64 || bf_kind == FFI_KIND_ULONGLONG ||
+					(bf_kind == FFI_KIND_SIZE_T && sizeof(size_t) == 8) ||
+					(bf_kind == FFI_KIND_UINTPTR_T && sizeof(uintptr_t) == 8) ||
+					(bf_kind == FFI_KIND_ULONG && sizeof(unsigned long) == 8)) {
+					snprintf(buf, sizeof(buf), "%llu", (unsigned long long)val);
+				} else {
+					int64_t sval = (int64_t)val;
+					if (bit_w < 64) {
+						uint64_t sign_bit = (uint64_t)1 << (bit_w - 1);
+						if (val & sign_bit)
+							sval = (int64_t)(val | ~mask);
+					}
+					snprintf(buf, sizeof(buf), "%lld", (long long)sval);
+				}
+				ring_vm_api_retstring((VM *)pPointer, buf);
+			} else {
+				ring_vm_api_retnumber((VM *)pPointer, (double)val);
+			}
+			return;
+		}
+	}
+
 	const char *type_str = RING_API_GETSTRING(2);
 	FFI_Type *type = ffi_type_parse(ctx, type_str);
 	if (!type) {
@@ -2058,6 +2187,47 @@ RING_FUNC(ring_cffi_set)
 	if (!ptr) {
 		RING_API_ERROR("ffi_set: null pointer");
 		return;
+	}
+
+	const char *ptr_type = ring_list_getstring(pList, RING_CPOINTER_TYPE);
+	if (ptr_type && strncmp(ptr_type, FFI_BITFIELD_TYPE_TAG "_", 3) == 0) {
+		int kind_val = 0, bit_off = 0, bit_w = 0;
+		if (sscanf(ptr_type + 3, "%d_%d_%d", &kind_val, &bit_off, &bit_w) == 3 && bit_w > 0) {
+			FFI_TypeKind bf_kind = (FFI_TypeKind)kind_val;
+			FFI_Type *bf_type = ffi_type_primitive(ctx, bf_kind);
+			if (!bf_type) {
+				RING_API_ERROR("ffi_set: bitfield type unknown");
+				return;
+			}
+			uint64_t new_val = 0;
+			if (RING_API_ISNUMBER(3)) {
+				new_val = (uint64_t)(int64_t)RING_API_GETNUMBER(3);
+			} else if (RING_API_ISSTRING(3)) {
+				new_val = (uint64_t)strtoull(RING_API_GETSTRING(3), NULL, 10);
+			}
+			uint64_t mask = (bit_w >= 64) ? ~(uint64_t)0 : ((uint64_t)1 << bit_w) - 1;
+			new_val &= mask;
+			uint64_t raw = 0;
+			if (bf_type->size == 1)
+				raw = *(uint8_t *)ptr;
+			else if (bf_type->size == 2)
+				raw = *(uint16_t *)ptr;
+			else if (bf_type->size == 4)
+				raw = *(uint32_t *)ptr;
+			else if (bf_type->size == 8)
+				raw = *(uint64_t *)ptr;
+			raw &= ~(mask << bit_off);
+			raw |= (new_val << bit_off);
+			if (bf_type->size == 1)
+				*(uint8_t *)ptr = (uint8_t)raw;
+			else if (bf_type->size == 2)
+				*(uint16_t *)ptr = (uint16_t)raw;
+			else if (bf_type->size == 4)
+				*(uint32_t *)ptr = (uint32_t)raw;
+			else if (bf_type->size == 8)
+				*(uint64_t *)ptr = (uint64_t)raw;
+			return;
+		}
 	}
 
 	const char *type_str = RING_API_GETSTRING(2);
@@ -2256,7 +2426,7 @@ RING_FUNC(ring_cffi_struct)
 
 			FFI_Type *type = ffi_type_parse(ctx, field_type);
 			if (type) {
-				ffi_struct_add_field(ctx, st, field_name, type);
+				ffi_struct_add_field(ctx, st, field_name, type, 0);
 			}
 		}
 	}
@@ -2416,34 +2586,73 @@ RING_FUNC(ring_cffi_field)
 		return;
 	}
 
-	const char *field_name = RING_API_GETSTRING(3);
+	const char *field_path = RING_API_GETSTRING(3);
 
-	if (type->kind == FFI_KIND_STRUCT) {
-		FFI_StructType *st = type->info.struct_type;
-		FFI_StructField *field = ffi_struct_find_field(st, field_name);
-		if (field) {
-			void *field_ptr = (char *)ptr + field->offset;
-			RING_API_RETCPOINTER(field_ptr, "FFI_Ptr");
+	char path_buf[256];
+	strncpy(path_buf, field_path, sizeof(path_buf) - 1);
+	path_buf[sizeof(path_buf) - 1] = '\0';
+
+	void *cur_ptr = ptr;
+	FFI_Type *cur_type = type;
+	char *segment = path_buf;
+	char *dot;
+
+	while (segment && *segment) {
+		dot = strchr(segment, '.');
+		if (dot)
+			*dot = '\0';
+
+		if (cur_type->kind == FFI_KIND_STRUCT) {
+			FFI_StructType *st = cur_type->info.struct_type;
+			FFI_StructField *field = ffi_struct_find_field(st, segment);
+			if (!field) {
+				RING_API_ERROR("ffi_field: field not found in struct");
+				return;
+			}
+			if (field->bit_width > 0) {
+				void *field_ptr = (char *)cur_ptr + field->offset;
+				char tag[64];
+				snprintf(tag, sizeof(tag), "%s_%d_%d_%d", FFI_BITFIELD_TYPE_TAG,
+						 (int)field->type->kind, (int)field->bit_offset, (int)field->bit_width);
+				RING_API_RETCPOINTER(field_ptr, tag);
+				return;
+			}
+			cur_ptr = (char *)cur_ptr + field->offset;
+			cur_type = field->type;
+		} else if (cur_type->kind == FFI_KIND_UNION) {
+			FFI_UnionType *ut = cur_type->info.union_type;
+			FFI_StructField *ufield = ffi_union_find_field(ut, segment);
+			if (!ufield) {
+				RING_API_ERROR("ffi_field: field not found in union");
+				return;
+			}
+			if (ufield->bit_width > 0) {
+				char tag[64];
+				snprintf(tag, sizeof(tag), "%s_%d_%d_%d", FFI_BITFIELD_TYPE_TAG,
+						 (int)ufield->type->kind, (int)ufield->bit_offset, (int)ufield->bit_width);
+				RING_API_RETCPOINTER(cur_ptr, tag);
+				return;
+			}
+			cur_type = ufield->type;
+		} else {
+			if (!dot) {
+				RING_API_RETCPOINTER(cur_ptr, "FFI_Ptr");
+				return;
+			}
+			RING_API_ERROR("ffi_field: intermediate field is not a struct or union");
 			return;
 		}
-		RING_API_ERROR("ffi_field: field not found in struct");
-	} else if (type->kind == FFI_KIND_UNION) {
-		FFI_UnionType *ut = type->info.union_type;
-		FFI_StructField *ufield = ffi_union_find_field(ut, field_name);
-		if (ufield) {
-			RING_API_RETCPOINTER(ptr, "FFI_Ptr");
-			return;
-		}
-		RING_API_ERROR("ffi_field: field not found in union");
-	} else {
-		RING_API_ERROR("ffi_field: second parameter must be a struct or union type");
+
+		segment = dot ? dot + 1 : NULL;
 	}
+
+	RING_API_RETCPOINTER(cur_ptr, "FFI_Ptr");
 }
 
 RING_FUNC(ring_cffi_field_offset)
 {
 	if (RING_API_PARACOUNT < 2) {
-		RING_API_ERROR("ffi_field_offset(struct_type, fieldname) requires 2 parameters");
+		RING_API_ERROR("ffi_field_offset(type, fieldname) requires 2 parameters");
 		return;
 	}
 
@@ -2454,21 +2663,53 @@ RING_FUNC(ring_cffi_field_offset)
 
 	List *pList = RING_API_GETLIST(1);
 	FFI_Type *type = (FFI_Type *)ring_list_getpointer(pList, RING_CPOINTER_POINTER);
-	if (!type || type->kind != FFI_KIND_STRUCT) {
-		RING_API_ERROR("ffi_field_offset: first parameter must be a struct type");
+	if (!type) {
+		RING_API_ERROR("ffi_field_offset: first parameter must be a struct or union type");
 		return;
 	}
 
-	const char *field_name = RING_API_GETSTRING(2);
-	FFI_StructType *st = type->info.struct_type;
+	const char *field_path = RING_API_GETSTRING(2);
 
-	FFI_StructField *field = ffi_struct_find_field(st, field_name);
-	if (field) {
-		RING_API_RETNUMBER((double)field->offset);
-		return;
+	char path_buf[256];
+	strncpy(path_buf, field_path, sizeof(path_buf) - 1);
+	path_buf[sizeof(path_buf) - 1] = '\0';
+
+	FFI_Type *cur_type = type;
+	size_t cumulative_offset = 0;
+	char *segment = path_buf;
+	char *dot;
+
+	while (segment && *segment) {
+		dot = strchr(segment, '.');
+		if (dot)
+			*dot = '\0';
+
+		if (cur_type->kind == FFI_KIND_STRUCT) {
+			FFI_StructType *st = cur_type->info.struct_type;
+			FFI_StructField *field = ffi_struct_find_field(st, segment);
+			if (!field) {
+				RING_API_RETNUMBER(-1);
+				return;
+			}
+			cumulative_offset += field->offset;
+			cur_type = field->type;
+		} else if (cur_type->kind == FFI_KIND_UNION) {
+			FFI_UnionType *ut = cur_type->info.union_type;
+			FFI_StructField *ufield = ffi_union_find_field(ut, segment);
+			if (!ufield) {
+				RING_API_RETNUMBER(-1);
+				return;
+			}
+			cur_type = ufield->type;
+		} else {
+			RING_API_RETNUMBER(-1);
+			return;
+		}
+
+		segment = dot ? dot + 1 : NULL;
 	}
 
-	RING_API_RETNUMBER(-1);
+	RING_API_RETNUMBER((double)cumulative_offset);
 }
 
 RING_FUNC(ring_cffi_struct_size)
@@ -3339,6 +3580,13 @@ static bool cparser_parse_struct(CParser *p, bool is_union)
 				p->pos++;
 				int64_t bits;
 				cparser_number(p, &bits);
+				if (bits > 0) {
+					if (strlen(field_type) + 16 < sizeof(field_type)) {
+						char bw[32];
+						snprintf(bw, sizeof(bw), ":%lld", (long long)bits);
+						strcat(field_type, bw);
+					}
+				}
 			}
 
 			cparser_skip_ws(p);
@@ -3393,10 +3641,19 @@ static bool cparser_parse_struct(CParser *p, bool is_union)
 			for (int i = 1; i <= fcount; i++) {
 				List *fdef = ring_list_getlist(fields, i);
 				const char *fname = ring_list_getstring(fdef, 1);
-				const char *ftype = ring_list_getstring(fdef, 2);
-				FFI_Type *type = ffi_type_parse(p->ctx, ftype);
+				const char *ftype_raw = ring_list_getstring(fdef, 2);
+				size_t bw = 0;
+				char ftype_buf[512];
+				strncpy(ftype_buf, ftype_raw, sizeof(ftype_buf) - 1);
+				ftype_buf[sizeof(ftype_buf) - 1] = '\0';
+				char *colon = strchr(ftype_buf, ':');
+				if (colon) {
+					bw = (size_t)strtoull(colon + 1, NULL, 10);
+					*colon = '\0';
+				}
+				FFI_Type *type = ffi_type_parse(p->ctx, ftype_buf);
 				if (type) {
-					ffi_struct_add_field(p->ctx, st, fname, type);
+					ffi_struct_add_field(p->ctx, st, fname, type, bw);
 				}
 			}
 			ffi_struct_finalize(p->ctx, st);
@@ -4211,6 +4468,140 @@ RING_FUNC(ring_cffi_bind)
 	RING_API_RETNUMBER(1);
 }
 
+RING_FUNC(ring_cffi_cast)
+{
+	if (RING_API_PARACOUNT < 2) {
+		RING_API_ERROR("ffi_cast(ptr, type) requires 2 parameters");
+		return;
+	}
+
+	if (!RING_API_ISCPOINTER(1) || !RING_API_ISSTRING(2)) {
+		RING_API_ERROR("ffi_cast: invalid parameters");
+		return;
+	}
+
+	List *pList = RING_API_GETLIST(1);
+	void *ptr = ring_list_getpointer(pList, RING_CPOINTER_POINTER);
+	const char *new_type = RING_API_GETSTRING(2);
+
+	RING_API_RETCPOINTER(ptr, new_type);
+}
+
+RING_FUNC(ring_cffi_string_array)
+{
+	if (RING_API_PARACOUNT < 1 || !RING_API_ISLIST(1)) {
+		RING_API_ERROR("ffi_string_array(list) requires a list of strings");
+		return;
+	}
+
+	FFI_Context *ctx = get_or_create_context(pPointer);
+	List *str_list = RING_API_GETLIST(1);
+	int count = ring_list_getsize(str_list);
+
+	char **arr = (char **)ring_state_calloc(ctx->ring_state, 1, sizeof(char *) * (count + 1));
+	if (!arr) {
+		RING_API_ERROR("ffi_string_array: out of memory");
+		return;
+	}
+
+	for (int i = 1; i <= count; i++) {
+		if (ring_list_isstring(str_list, i)) {
+			const char *raw = ring_list_getstring(str_list, i);
+			arr[i - 1] = ffi_string_new(ctx, raw);
+			if (!arr[i - 1]) {
+				ring_state_free(ctx->ring_state, arr);
+				RING_API_ERROR("ffi_string_array: out of memory");
+				return;
+			}
+			ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, arr[i - 1],
+											  ffi_gc_free_ptr);
+		} else {
+			arr[i - 1] = NULL;
+		}
+	}
+	arr[count] = NULL;
+
+	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, arr, ffi_gc_free_ptr);
+	RING_API_RETCPOINTER(arr, "FFI_Ptr");
+}
+
+RING_FUNC(ring_cffi_wstring)
+{
+	if (RING_API_PARACOUNT < 1 || !RING_API_ISSTRING(1)) {
+		RING_API_ERROR("ffi_wstring(str) expects a string");
+		return;
+	}
+
+	FFI_Context *ctx = get_or_create_context(pPointer);
+	const char *str = RING_API_GETSTRING(1);
+	size_t len = strlen(str);
+
+#ifdef _WIN32
+	int wlen = MultiByteToWideChar(CP_UTF8, 0, str, (int)len, NULL, 0);
+	if (wlen == 0) {
+		RING_API_ERROR("ffi_wstring: conversion failed");
+		return;
+	}
+	wchar_t *wbuf = (wchar_t *)ring_state_calloc(ctx->ring_state, 1, sizeof(wchar_t) * (wlen + 1));
+	if (!wbuf) {
+		RING_API_ERROR("ffi_wstring: out of memory");
+		return;
+	}
+	MultiByteToWideChar(CP_UTF8, 0, str, (int)len, wbuf, wlen);
+	wbuf[wlen] = L'\0';
+#else
+	size_t wlen = mbstowcs(NULL, str, 0);
+	if (wlen == (size_t)-1) {
+		wlen = len;
+	}
+	wchar_t *wbuf = (wchar_t *)ring_state_calloc(ctx->ring_state, 1, sizeof(wchar_t) * (wlen + 1));
+	if (!wbuf) {
+		RING_API_ERROR("ffi_wstring: out of memory");
+		return;
+	}
+	mbstowcs(wbuf, str, wlen + 1);
+#endif
+
+	RING_API_RETMANAGEDCPOINTER(wbuf, "FFI_Ptr", ffi_gc_free_ptr);
+}
+
+RING_FUNC(ring_cffi_wtostring)
+{
+	if (RING_API_PARACOUNT < 1 || !RING_API_ISCPOINTER(1)) {
+		RING_API_ERROR("ffi_wtostring(ptr) expects a pointer");
+		return;
+	}
+
+	FFI_Context *ctx = get_or_create_context(pPointer);
+	List *pList = RING_API_GETLIST(1);
+	wchar_t *wptr = (wchar_t *)ring_list_getpointer(pList, RING_CPOINTER_POINTER);
+	if (!wptr)
+		return;
+
+#ifdef _WIN32
+	int mblen = WideCharToMultiByte(CP_UTF8, 0, wptr, -1, NULL, 0, NULL, NULL);
+	if (mblen == 0)
+		return;
+	char *buf = (char *)ring_state_malloc(ctx->ring_state, mblen);
+	if (!buf)
+		return;
+	WideCharToMultiByte(CP_UTF8, 0, wptr, -1, buf, mblen, NULL, NULL);
+	RING_API_RETSTRING(buf);
+	ring_state_free(ctx->ring_state, buf);
+#else
+	size_t mblen = wcstombs(NULL, wptr, 0);
+	if (mblen == (size_t)-1)
+		return;
+	char *buf = (char *)ring_state_malloc(ctx->ring_state, mblen + 1);
+	if (!buf)
+		return;
+	wcstombs(buf, wptr, mblen + 1);
+	buf[mblen] = '\0';
+	RING_API_RETSTRING(buf);
+	ring_state_free(ctx->ring_state, buf);
+#endif
+}
+
 RING_LIBINIT
 {
 #ifdef _WIN32
@@ -4259,4 +4650,8 @@ RING_LIBINIT
 	RING_API_REGISTER("cffi_varcall", ring_cffi_varcall);
 	RING_API_REGISTER("cffi_cdef", ring_cffi_cdef);
 	RING_API_REGISTER("cffi_bind", ring_cffi_bind);
+	RING_API_REGISTER("cffi_cast", ring_cffi_cast);
+	RING_API_REGISTER("cffi_string_array", ring_cffi_string_array);
+	RING_API_REGISTER("cffi_wstring", ring_cffi_wstring);
+	RING_API_REGISTER("cffi_wtostring", ring_cffi_wtostring);
 }
