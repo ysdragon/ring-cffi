@@ -349,6 +349,7 @@ FFI_Type *ffi_type_primitive(FFI_Context *ctx, FFI_TypeKind kind)
 	type->alignment = type->ffi_type_ptr->alignment;
 	type->pointer_depth = 0;
 
+	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, type, ffi_gc_free_type);
 	return type;
 }
 
@@ -366,6 +367,7 @@ FFI_Type *ffi_type_ptr(FFI_Context *ctx, FFI_Type *base)
 	type->pointer_depth = base ? base->pointer_depth + 1 : 1;
 	type->info.pointed_type = base;
 
+	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, type, ffi_gc_free_type);
 	return type;
 }
 
@@ -736,36 +738,27 @@ static void ffi_write_typed_value(void *dst, FFI_Type *type, double val)
 	}
 }
 
-static void ffi_push_return_value(VM *vm, void *result_ptr, FFI_Type *rtype)
+static void ffi_push_to_ring(VM *vm, void *src, FFI_Type *type, bool is_ffi_arg)
 {
-	if (rtype->kind == FFI_KIND_VOID) {
+	if (type->kind == FFI_KIND_VOID) {
 		ring_vm_api_retnumber(vm, 0);
-	} else if (rtype->kind == FFI_KIND_POINTER || rtype->pointer_depth > 0) {
-		ring_vm_api_retcpointer(vm, *(void **)result_ptr, "FFI_Ptr");
-	} else if (rtype->kind == FFI_KIND_FLOAT) {
-		ring_vm_api_retnumber(vm, (double)*(float *)result_ptr);
-	} else if (rtype->kind == FFI_KIND_DOUBLE) {
-		ring_vm_api_retnumber(vm, *(double *)result_ptr);
-	} else if (rtype->kind == FFI_KIND_LONGDOUBLE) {
-		ring_vm_api_retnumber(vm, (double)*(long double *)result_ptr);
-	} else if (ffi_is_64bit_int(rtype->kind)) {
+	} else if (type->kind == FFI_KIND_POINTER || type->pointer_depth > 0) {
+		ring_vm_api_retcpointer(vm, *(void **)src, "FFI_Ptr");
+	} else if (ffi_is_64bit_int(type->kind)) {
 		uint64_t uval;
 		int64_t ival;
-		int is_unsigned = (rtype->kind == FFI_KIND_UINT64 || rtype->kind == FFI_KIND_ULONGLONG ||
-						   (rtype->kind == FFI_KIND_SIZE_T && sizeof(size_t) == 8) ||
-						   (rtype->kind == FFI_KIND_UINTPTR_T && sizeof(uintptr_t) == 8) ||
-						   (rtype->kind == FFI_KIND_ULONG && sizeof(unsigned long) == 8));
+		int is_unsigned = (type->kind == FFI_KIND_UINT64 || type->kind == FFI_KIND_ULONGLONG ||
+						   (type->kind == FFI_KIND_SIZE_T && sizeof(size_t) == 8) ||
+						   (type->kind == FFI_KIND_UINTPTR_T && sizeof(uintptr_t) == 8) ||
+						   (type->kind == FFI_KIND_ULONG && sizeof(unsigned long) == 8));
 		if (is_unsigned) {
-			uval = *(uint64_t *)result_ptr;
+			uval = *(uint64_t *)src;
 		} else {
-			ival = *(int64_t *)result_ptr;
+			ival = *(int64_t *)src;
 			uval = (uint64_t)ival;
 		}
 		if (uval <= (1ULL << 53)) {
-			if (is_unsigned)
-				ring_vm_api_retnumber(vm, (double)uval);
-			else
-				ring_vm_api_retnumber(vm, (double)ival);
+			ring_vm_api_retnumber(vm, is_unsigned ? (double)uval : (double)ival);
 		} else {
 			char buf[32];
 			if (is_unsigned)
@@ -775,65 +768,68 @@ static void ffi_push_return_value(VM *vm, void *result_ptr, FFI_Type *rtype)
 			ring_vm_api_retstring(vm, buf);
 		}
 	} else {
-		ffi_arg res = *(ffi_arg *)result_ptr;
-		switch (rtype->kind) {
-		case FFI_KIND_INT8:
-		case FFI_KIND_SCHAR:
-		case FFI_KIND_CHAR:
-			ring_vm_api_retnumber(vm, (double)(int8_t)res);
-			break;
-		case FFI_KIND_UINT8:
-		case FFI_KIND_UCHAR:
-		case FFI_KIND_BOOL:
-			ring_vm_api_retnumber(vm, (double)(uint8_t)res);
-			break;
-		case FFI_KIND_INT16:
-		case FFI_KIND_SHORT:
-			ring_vm_api_retnumber(vm, (double)(int16_t)res);
-			break;
-		case FFI_KIND_UINT16:
-		case FFI_KIND_USHORT:
-			ring_vm_api_retnumber(vm, (double)(uint16_t)res);
-			break;
-		case FFI_KIND_INT32:
-		case FFI_KIND_INT:
-			ring_vm_api_retnumber(vm, (double)(int32_t)res);
-			break;
-		case FFI_KIND_UINT32:
-		case FFI_KIND_UINT:
-			ring_vm_api_retnumber(vm, (double)(uint32_t)res);
-			break;
-		case FFI_KIND_LONG:
-			ring_vm_api_retnumber(vm, (double)(long)res);
-			break;
-		case FFI_KIND_ULONG:
-			ring_vm_api_retnumber(vm, (double)(unsigned long)res);
-			break;
-		default:
-			ring_vm_api_retnumber(vm, (double)(int)res);
-			break;
+		if (is_ffi_arg) {
+			ffi_arg res = *(ffi_arg *)src;
+			switch (type->kind) {
+			case FFI_KIND_FLOAT:
+				ring_vm_api_retnumber(vm, (double)*(float *)src);
+				break;
+			case FFI_KIND_DOUBLE:
+				ring_vm_api_retnumber(vm, *(double *)src);
+				break;
+			case FFI_KIND_LONGDOUBLE:
+				ring_vm_api_retnumber(vm, (double)*(long double *)src);
+				break;
+			case FFI_KIND_INT8:
+			case FFI_KIND_SCHAR:
+			case FFI_KIND_CHAR:
+				ring_vm_api_retnumber(vm, (double)(int8_t)res);
+				break;
+			case FFI_KIND_UINT8:
+			case FFI_KIND_UCHAR:
+			case FFI_KIND_BOOL:
+				ring_vm_api_retnumber(vm, (double)(uint8_t)res);
+				break;
+			case FFI_KIND_INT16:
+			case FFI_KIND_SHORT:
+				ring_vm_api_retnumber(vm, (double)(int16_t)res);
+				break;
+			case FFI_KIND_UINT16:
+			case FFI_KIND_USHORT:
+				ring_vm_api_retnumber(vm, (double)(uint16_t)res);
+				break;
+			case FFI_KIND_INT32:
+			case FFI_KIND_INT:
+				ring_vm_api_retnumber(vm, (double)(int32_t)res);
+				break;
+			case FFI_KIND_UINT32:
+			case FFI_KIND_UINT:
+				ring_vm_api_retnumber(vm, (double)(uint32_t)res);
+				break;
+			case FFI_KIND_LONG:
+				ring_vm_api_retnumber(vm, (double)(long)res);
+				break;
+			case FFI_KIND_ULONG:
+				ring_vm_api_retnumber(vm, (double)(unsigned long)res);
+				break;
+			default:
+				ring_vm_api_retnumber(vm, (double)(int)res);
+				break;
+			}
+		} else {
+			ring_vm_api_retnumber(vm, ffi_read_typed_value(src, type));
 		}
 	}
 }
 
+static void ffi_push_return_value(VM *vm, void *result_ptr, FFI_Type *rtype)
+{
+	ffi_push_to_ring(vm, result_ptr, rtype, true);
+}
+
 static void ffi_ret_value(VM *vm, void *src, FFI_Type *type)
 {
-	if (type->kind == FFI_KIND_POINTER || type->pointer_depth > 0) {
-		ring_vm_api_retcpointer(vm, *(void **)src, "FFI_Ptr");
-	} else if (ffi_is_64bit_int(type->kind)) {
-		char buf[32];
-		if (type->kind == FFI_KIND_UINT64 || type->kind == FFI_KIND_ULONGLONG ||
-			(type->kind == FFI_KIND_SIZE_T && sizeof(size_t) == 8) ||
-			(type->kind == FFI_KIND_UINTPTR_T && sizeof(uintptr_t) == 8) ||
-			(type->kind == FFI_KIND_ULONG && sizeof(unsigned long) == 8)) {
-			snprintf(buf, sizeof(buf), "%llu", (unsigned long long)*(uint64_t *)src);
-		} else {
-			snprintf(buf, sizeof(buf), "%lld", (long long)*(int64_t *)src);
-		}
-		ring_vm_api_retstring(vm, buf);
-	} else {
-		ring_vm_api_retnumber(vm, ffi_read_typed_value(src, type));
-	}
+	ffi_push_to_ring(vm, src, type, false);
 }
 
 size_t ffi_sizeof(FFI_Type *type) { return type ? type->size : 0; }
@@ -1287,9 +1283,10 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 			return cached;
 	}
 
-	char buf[1024];
-	strncpy(buf, type_str, sizeof(buf) - 1);
-	buf[sizeof(buf) - 1] = '\0';
+	char *buf = (char *)ring_state_malloc(ctx->ring_state, strlen(type_str) + 1);
+	if (!buf)
+		return NULL;
+	strcpy(buf, type_str);
 
 	char *p = buf;
 	while (*p && isspace(*p))
@@ -1334,31 +1331,38 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 	}
 	if (kind == FFI_KIND_UNKNOWN) {
 		ffi_set_error(ctx, "Unknown type: '%s'", type_str);
+		ring_state_free(ctx->ring_state, buf);
 		return NULL;
 	}
 	FFI_Type *base;
 	if (kind == FFI_KIND_STRUCT) {
 		FFI_StructType *st_found = (FFI_StructType *)ring_hashtable_findpointer(ctx->structs, p);
 		base = (FFI_Type *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Type));
-		if (!base)
+		if (!base) {
+			ring_state_free(ctx->ring_state, buf);
 			return NULL;
+		}
 		memset(base, 0, sizeof(FFI_Type));
 		base->kind = FFI_KIND_STRUCT;
 		base->info.struct_type = st_found;
 		base->ffi_type_ptr = &st_found->ffi_type_def;
 		base->size = st_found->size;
 		base->alignment = st_found->alignment;
+		ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, base, ffi_gc_free_type);
 	} else if (kind == FFI_KIND_UNION) {
 		FFI_UnionType *ut_found = (FFI_UnionType *)ring_hashtable_findpointer(ctx->unions, p);
 		base = (FFI_Type *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Type));
-		if (!base)
+		if (!base) {
+			ring_state_free(ctx->ring_state, buf);
 			return NULL;
+		}
 		memset(base, 0, sizeof(FFI_Type));
 		base->kind = FFI_KIND_UNION;
 		base->info.union_type = ut_found;
 		base->ffi_type_ptr = &ffi_type_void;
 		base->size = ut_found->size;
 		base->alignment = ut_found->alignment;
+		ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, base, ffi_gc_free_type);
 	} else {
 		base = ffi_type_primitive(ctx, kind);
 	}
@@ -1375,9 +1379,9 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 	/* Store in cache */
 	if (ctx->type_cache && result) {
 		ring_hashtable_newpointer_gc(ctx->ring_state, ctx->type_cache, type_str, result);
-		ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, result, ffi_gc_free_type);
 	}
 
+	ring_state_free(ctx->ring_state, buf);
 	return result;
 }
 
@@ -2095,6 +2099,95 @@ RING_FUNC(ring_cffi_sym)
 	}
 }
 
+static bool ffi_parse_bitfield_tag(const char *tag, FFI_TypeKind *kind, int *bit_off, int *bit_w)
+{
+	if (!tag || strncmp(tag, FFI_BITFIELD_TYPE_TAG "_", 3) != 0)
+		return false;
+	int k = 0;
+	if (sscanf(tag + 3, "%d_%d_%d", &k, bit_off, bit_w) == 3 && *bit_w > 0) {
+		*kind = (FFI_TypeKind)k;
+		return true;
+	}
+	return false;
+}
+
+static void ffi_read_bitfield(VM *vm, FFI_Context *ctx, void *ptr, FFI_TypeKind bf_kind,
+							  int bit_off, int bit_w)
+{
+	FFI_Type *bf_type = ffi_type_primitive(ctx, bf_kind);
+	if (!bf_type) {
+		ring_vm_error(vm, "ffi_get: bitfield type unknown");
+		return;
+	}
+
+	uint64_t raw = 0;
+	if (bf_type->size == 1)
+		raw = *(uint8_t *)ptr;
+	else if (bf_type->size == 2)
+		raw = *(uint16_t *)ptr;
+	else if (bf_type->size == 4)
+		raw = *(uint32_t *)ptr;
+	else if (bf_type->size == 8)
+		raw = *(uint64_t *)ptr;
+
+	uint64_t mask = (bit_w >= 64) ? ~(uint64_t)0 : ((uint64_t)1 << bit_w) - 1;
+	uint64_t val = (raw >> bit_off) & mask;
+
+	if (ffi_is_64bit_int(bf_kind)) {
+		char buf[32];
+		int is_unsigned = (bf_kind == FFI_KIND_UINT64 || bf_kind == FFI_KIND_ULONGLONG ||
+						   (bf_kind == FFI_KIND_SIZE_T && sizeof(size_t) == 8) ||
+						   (bf_kind == FFI_KIND_UINTPTR_T && sizeof(uintptr_t) == 8) ||
+						   (bf_kind == FFI_KIND_ULONG && sizeof(unsigned long) == 8));
+		if (is_unsigned) {
+			snprintf(buf, sizeof(buf), "%llu", (unsigned long long)val);
+		} else {
+			int64_t sval = (int64_t)val;
+			if (bit_w < 64 && (val & ((uint64_t)1 << (bit_w - 1))))
+				sval = (int64_t)(val | ~mask);
+			snprintf(buf, sizeof(buf), "%lld", (long long)sval);
+		}
+		ring_vm_api_retstring(vm, buf);
+	} else {
+		ring_vm_api_retnumber(vm, (double)val);
+	}
+}
+
+static void ffi_write_bitfield(VM *vm, FFI_Context *ctx, void *ptr, FFI_TypeKind bf_kind,
+							   int bit_off, int bit_w, uint64_t new_val)
+{
+	FFI_Type *bf_type = ffi_type_primitive(ctx, bf_kind);
+	if (!bf_type) {
+		ring_vm_error(vm, "ffi_set: bitfield type unknown");
+		return;
+	}
+
+	uint64_t mask = (bit_w >= 64) ? ~(uint64_t)0 : ((uint64_t)1 << bit_w) - 1;
+	new_val &= mask;
+
+	uint64_t raw = 0;
+	if (bf_type->size == 1)
+		raw = *(uint8_t *)ptr;
+	else if (bf_type->size == 2)
+		raw = *(uint16_t *)ptr;
+	else if (bf_type->size == 4)
+		raw = *(uint32_t *)ptr;
+	else if (bf_type->size == 8)
+		raw = *(uint64_t *)ptr;
+
+	raw &= ~(mask << bit_off);
+	raw |= (new_val << bit_off);
+
+	if (bf_type->size == 1)
+		*(uint8_t *)ptr = (uint8_t)raw;
+	else if (bf_type->size == 2)
+		*(uint16_t *)ptr = (uint16_t)raw;
+	else if (bf_type->size == 4)
+		*(uint32_t *)ptr = (uint32_t)raw;
+	else if (bf_type->size == 8)
+		*(uint64_t *)ptr = (uint64_t)raw;
+}
+
 RING_FUNC(ring_cffi_get)
 {
 	if (RING_API_PARACOUNT < 2) {
@@ -2116,48 +2209,11 @@ RING_FUNC(ring_cffi_get)
 	}
 
 	const char *ptr_type = ring_list_getstring(pList, RING_CPOINTER_TYPE);
-	if (ptr_type && strncmp(ptr_type, FFI_BITFIELD_TYPE_TAG "_", 3) == 0) {
-		int kind_val = 0, bit_off = 0, bit_w = 0;
-		if (sscanf(ptr_type + 3, "%d_%d_%d", &kind_val, &bit_off, &bit_w) == 3 && bit_w > 0) {
-			FFI_TypeKind bf_kind = (FFI_TypeKind)kind_val;
-			FFI_Type *bf_type = ffi_type_primitive(ctx, bf_kind);
-			if (!bf_type) {
-				RING_API_ERROR("ffi_get: bitfield type unknown");
-				return;
-			}
-			uint64_t raw = 0;
-			if (bf_type->size == 1)
-				raw = *(uint8_t *)ptr;
-			else if (bf_type->size == 2)
-				raw = *(uint16_t *)ptr;
-			else if (bf_type->size == 4)
-				raw = *(uint32_t *)ptr;
-			else if (bf_type->size == 8)
-				raw = *(uint64_t *)ptr;
-			uint64_t mask = (bit_w >= 64) ? ~(uint64_t)0 : ((uint64_t)1 << bit_w) - 1;
-			uint64_t val = (raw >> bit_off) & mask;
-			if (ffi_is_64bit_int(bf_kind)) {
-				char buf[32];
-				if (bf_kind == FFI_KIND_UINT64 || bf_kind == FFI_KIND_ULONGLONG ||
-					(bf_kind == FFI_KIND_SIZE_T && sizeof(size_t) == 8) ||
-					(bf_kind == FFI_KIND_UINTPTR_T && sizeof(uintptr_t) == 8) ||
-					(bf_kind == FFI_KIND_ULONG && sizeof(unsigned long) == 8)) {
-					snprintf(buf, sizeof(buf), "%llu", (unsigned long long)val);
-				} else {
-					int64_t sval = (int64_t)val;
-					if (bit_w < 64) {
-						uint64_t sign_bit = (uint64_t)1 << (bit_w - 1);
-						if (val & sign_bit)
-							sval = (int64_t)(val | ~mask);
-					}
-					snprintf(buf, sizeof(buf), "%lld", (long long)sval);
-				}
-				ring_vm_api_retstring((VM *)pPointer, buf);
-			} else {
-				ring_vm_api_retnumber((VM *)pPointer, (double)val);
-			}
-			return;
-		}
+	FFI_TypeKind bf_kind;
+	int bf_off, bf_w;
+	if (ffi_parse_bitfield_tag(ptr_type, &bf_kind, &bf_off, &bf_w)) {
+		ffi_read_bitfield((VM *)pPointer, ctx, ptr, bf_kind, bf_off, bf_w);
+		return;
 	}
 
 	const char *type_str = RING_API_GETSTRING(2);
@@ -2204,44 +2260,17 @@ RING_FUNC(ring_cffi_set)
 	}
 
 	const char *ptr_type = ring_list_getstring(pList, RING_CPOINTER_TYPE);
-	if (ptr_type && strncmp(ptr_type, FFI_BITFIELD_TYPE_TAG "_", 3) == 0) {
-		int kind_val = 0, bit_off = 0, bit_w = 0;
-		if (sscanf(ptr_type + 3, "%d_%d_%d", &kind_val, &bit_off, &bit_w) == 3 && bit_w > 0) {
-			FFI_TypeKind bf_kind = (FFI_TypeKind)kind_val;
-			FFI_Type *bf_type = ffi_type_primitive(ctx, bf_kind);
-			if (!bf_type) {
-				RING_API_ERROR("ffi_set: bitfield type unknown");
-				return;
-			}
-			uint64_t new_val = 0;
-			if (RING_API_ISNUMBER(3)) {
-				new_val = (uint64_t)(int64_t)RING_API_GETNUMBER(3);
-			} else if (RING_API_ISSTRING(3)) {
-				new_val = (uint64_t)strtoull(RING_API_GETSTRING(3), NULL, 10);
-			}
-			uint64_t mask = (bit_w >= 64) ? ~(uint64_t)0 : ((uint64_t)1 << bit_w) - 1;
-			new_val &= mask;
-			uint64_t raw = 0;
-			if (bf_type->size == 1)
-				raw = *(uint8_t *)ptr;
-			else if (bf_type->size == 2)
-				raw = *(uint16_t *)ptr;
-			else if (bf_type->size == 4)
-				raw = *(uint32_t *)ptr;
-			else if (bf_type->size == 8)
-				raw = *(uint64_t *)ptr;
-			raw &= ~(mask << bit_off);
-			raw |= (new_val << bit_off);
-			if (bf_type->size == 1)
-				*(uint8_t *)ptr = (uint8_t)raw;
-			else if (bf_type->size == 2)
-				*(uint16_t *)ptr = (uint16_t)raw;
-			else if (bf_type->size == 4)
-				*(uint32_t *)ptr = (uint32_t)raw;
-			else if (bf_type->size == 8)
-				*(uint64_t *)ptr = (uint64_t)raw;
-			return;
+	FFI_TypeKind bf_kind;
+	int bf_off, bf_w;
+	if (ffi_parse_bitfield_tag(ptr_type, &bf_kind, &bf_off, &bf_w)) {
+		uint64_t new_val = 0;
+		if (RING_API_ISNUMBER(3)) {
+			new_val = (uint64_t)(int64_t)RING_API_GETNUMBER(3);
+		} else if (RING_API_ISSTRING(3)) {
+			new_val = (uint64_t)strtoull(RING_API_GETSTRING(3), NULL, 10);
 		}
+		ffi_write_bitfield((VM *)pPointer, ctx, ptr, bf_kind, bf_off, bf_w, new_val);
+		return;
 	}
 
 	const char *type_str = RING_API_GETSTRING(2);
@@ -3348,7 +3377,7 @@ static bool cparser_ident(CParser *p, char *out, size_t sz)
 	}
 	out[i] = '\0';
 	if (isalnum(*p->pos) || *p->pos == '_') {
-		snprintf(p->error, sizeof(p->error), "Identifier too long (max %zu)", sz - 1);
+		ffi_set_error(p->ctx, "Identifier too long (max %zu)", sz - 1);
 		return false;
 	}
 	return true;
@@ -4068,6 +4097,7 @@ finish_func:
 
 static void cparser_parse(CParser *p)
 {
+	p->ctx->error_msg[0] = '\0';
 	while (*p->pos) {
 		cparser_skip_attributes(p);
 		if (!*p->pos)
@@ -4077,6 +4107,8 @@ static void cparser_parse(CParser *p)
 
 		if (cparser_match(p, "typedef")) {
 			if (!cparser_parse_typedef(p)) {
+				if (p->ctx->error_msg[0] != '\0')
+					break;
 				while (*p->pos && *p->pos != ';')
 					p->pos++;
 				if (*p->pos == ';')
@@ -4092,6 +4124,8 @@ static void cparser_parse(CParser *p)
 				if (!cparser_peek(p, "{")) {
 					cparser_ident(p, sname, sizeof(sname));
 				}
+				if (p->ctx->error_msg[0] != '\0')
+					break;
 				if (cparser_peek(p, "{")) {
 					p->pos = before_name;
 					cparser_parse_struct(p, false);
@@ -4108,6 +4142,8 @@ static void cparser_parse(CParser *p)
 				if (!cparser_peek(p, "{")) {
 					cparser_ident(p, uname, sizeof(uname));
 				}
+				if (p->ctx->error_msg[0] != '\0')
+					break;
 				if (cparser_peek(p, "{")) {
 					p->pos = before_name;
 					cparser_parse_struct(p, true);
@@ -4124,6 +4160,8 @@ static void cparser_parse(CParser *p)
 				if (!cparser_peek(p, "{")) {
 					cparser_ident(p, ename, sizeof(ename));
 				}
+				if (p->ctx->error_msg[0] != '\0')
+					break;
 				if (cparser_peek(p, "{")) {
 					p->pos = before_name;
 					cparser_parse_enum(p);
@@ -4135,6 +4173,8 @@ static void cparser_parse(CParser *p)
 
 		p->pos = save;
 		if (!cparser_parse_function(p)) {
+			if (p->ctx->error_msg[0] != '\0')
+				break;
 			while (*p->pos && *p->pos != ';' && *p->pos != '}')
 				p->pos++;
 			if (*p->pos == ';')
