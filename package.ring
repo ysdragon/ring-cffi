@@ -35,8 +35,18 @@ aPackageInfo = [
 		# Source — Ring
 		"src/cffi.ring",
 		# Source — C
-		"src/c_src/ring_cffi.c",
-		"src/c_src/ring_cffi.h",
+		"src/c_src/ring_cffi_internal.h",
+		"src/c_src/core.c",
+		"src/c_src/platform.c",
+		"src/c_src/library.c",
+		"src/c_src/types.c",
+		"src/c_src/values.c",
+		"src/c_src/memory.c",
+		"src/c_src/struct_union.c",
+		"src/c_src/function.c",
+		"src/c_src/invoke.c",
+		"src/c_src/callback.c",
+		"src/c_src/parser.c",
 		# Source — Utilities
 		"src/utils/install.ring",
 		"src/utils/uninstall.ring",
