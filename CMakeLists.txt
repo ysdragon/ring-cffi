@@ -31,7 +31,19 @@ set(RING_LIB "${RING_ROOT}/lib")
 set(RING_BIN "${RING_ROOT}/bin")
 
 # Source files
-set(RING_CFFI_C_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/ring_cffi.c")
+set(RING_CFFI_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/core.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/platform.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/library.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/types.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/memory.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/struct_union.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/values.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/function.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/invoke.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/callback.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/parser.c"
+)
 
 # Build libffi from submodule or fetch it
 set(FFI_LIBFFI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/c_src/libffi")
@@ -47,6 +59,10 @@ if(NOT EXISTS "${FFI_LIBFFI_DIR}/src/prep_cif.c")
     FetchContent_MakeAvailable(libffi)
     message(STATUS "libffi fetched to ${FFI_LIBFFI_DIR}")
 endif()
+
+# Check for Link-Time Optimization (LTO) support early — needed before libffi is configured
+include(CheckIPOSupported)
+check_ipo_supported(RESULT LTO_SUPPORTED)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 include(BuildLibFFI)
@@ -78,7 +94,7 @@ if(NOT DEFINED ARCH_DIR)
         set(ARCH_DIR "arm64")
     elseif(ARCH_DIR_RAW MATCHES "riscv64")
         set(ARCH_DIR "riscv64")
-    elseif(ARCH_DIR_RAW MATCHES "i386|i686|x8x")
+    elseif(ARCH_DIR_RAW MATCHES "i386|i686|x86")
         set(ARCH_DIR "i386")
     else()
         set(ARCH_DIR "${ARCH_DIR_RAW}")
@@ -111,7 +127,25 @@ else()
 endif()
 
 # Create the Ring CFFI shared library
-add_library(ring_cffi SHARED ${RING_CFFI_C_SOURCE})
+add_library(ring_cffi SHARED ${RING_CFFI_SOURCES})
+
+# Enable LTO on the final .so (global scope already verified LTO_SUPPORTED)
+if(LTO_SUPPORTED)
+    set_property(TARGET ring_cffi PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# Optimization: hide internal symbols
+if(NOT MSVC)
+    target_compile_options(ring_cffi PRIVATE -fvisibility=hidden)
+endif()
+
+# GNU ld: dead-code elimination + bind internal function refs locally (no PLT)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+    target_link_options(ring_cffi PRIVATE
+        "LINKER:--gc-sections"
+        "LINKER:-Bsymbolic-functions"
+    )
+endif()
 
 # Include directories
 target_include_directories(ring_cffi PRIVATE
