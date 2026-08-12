@@ -229,7 +229,11 @@ class CFFITest
 		? "Testing Struct By-Value..."
 		run("test_byval_div_return", :test_byval_div_return)
 		run("test_byval_ldiv_return", :test_byval_ldiv_return)
-		run("test_byval_lldiv_return", :test_byval_lldiv_return)
+		# lldiv is not exported by legacy msvcrt.dll on Windows
+		pLldivProbe = new FFI(cLibcPath)
+		if !cffi_isnull(pLldivProbe.sym("lldiv"))
+			run("test_byval_lldiv_return", :test_byval_lldiv_return)
+		ok
 		cLibmPath = detectLibm()
 		if !isNull(cLibmPath)
 			pLibm = new FFI(cLibmPath)
