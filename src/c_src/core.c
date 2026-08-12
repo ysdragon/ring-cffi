@@ -162,6 +162,8 @@ void ffi_gc_free_union_type(void *state, void *ptr)
 		ring_state_free((RingState *)state, field);
 		field = next;
 	}
+	if (ut->ffi_elements)
+		ring_state_free((RingState *)state, ut->ffi_elements);
 	ring_state_free((RingState *)state, ut);
 }
 

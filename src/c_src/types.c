@@ -389,7 +389,7 @@ FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str)
 		memset(base, 0, sizeof(FFI_Type));
 		base->kind = FFI_KIND_UNION;
 		base->info.union_type = ut_found;
-		base->ffi_type_ptr = &ffi_type_void;
+		base->ffi_type_ptr = ut_found->ffi_elements ? &ut_found->ffi_type_def : &ffi_type_void;
 		base->size = ut_found->size;
 		base->alignment = ut_found->alignment;
 		ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, base, ffi_gc_free_type);

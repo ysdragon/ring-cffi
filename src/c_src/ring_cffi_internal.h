@@ -112,6 +112,8 @@ typedef struct FFI_UnionType {
 	int field_count;
 	size_t size;
 	size_t alignment;
+	ffi_type ffi_type_def;
+	ffi_type **ffi_elements;
 } FFI_UnionType;
 
 typedef struct FFI_EnumConst {

@@ -67,9 +67,9 @@ int ffi_store_arg(FFI_Context *ctx, VM *pVM, List *aArgs, int i, int param_idx, 
 		return 0;
 	}
 
-	if (ptype && ptype->kind == FFI_KIND_STRUCT) {
-		/* By-value struct argument: the Ring side passes an FFI pointer to a
-		   buffer of the struct's size (e.g. from cffi_new or a previous
+	if (ptype && (ptype->kind == FFI_KIND_STRUCT || ptype->kind == FFI_KIND_UNION)) {
+		/* By-value struct/union argument: the Ring side passes an FFI pointer
+		   to a buffer of the type's size (e.g. from cffi_new or a previous
 		   by-value return); we copy the bytes so the ABI receives a value,
 		   not a pointer. */
 		void *ptr_val = NULL;
@@ -252,10 +252,10 @@ int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 
 	{
 		FFI_Type *ret_type = func->type->return_type;
-		if (ret_type && ret_type->kind == FFI_KIND_STRUCT) {
-			/* By-value struct return: libffi writes the whole struct into a
-			   caller-provided buffer of the struct's size; the scalar union
-			   below would overflow for anything larger than 16 bytes. */
+		if (ret_type && (ret_type->kind == FFI_KIND_STRUCT || ret_type->kind == FFI_KIND_UNION)) {
+			/* By-value struct/union return: libffi writes the whole value
+			   into a caller-provided buffer of the type's size; the scalar
+			   union below would overflow for anything larger than 16 bytes. */
 			size_t ret_size = ret_type->size > 0 ? ret_type->size : 1;
 			void *ret_buf = ring_state_calloc(ctx->ring_state, 1, ret_size);
 			if (!ret_buf) {
@@ -410,7 +410,7 @@ int ffi_call_variadic(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 	}
 
 	FFI_Type *ret_type = func->type->return_type;
-	if (ret_type && ret_type->kind == FFI_KIND_STRUCT) {
+	if (ret_type && (ret_type->kind == FFI_KIND_STRUCT || ret_type->kind == FFI_KIND_UNION)) {
 		size_t ret_size = ret_type->size > 0 ? ret_type->size : 1;
 		void *ret_buf = ring_state_calloc(ctx->ring_state, 1, ret_size);
 		if (!ret_buf) {

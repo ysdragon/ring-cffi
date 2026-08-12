@@ -39,18 +39,20 @@ void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *user_data)
 	for (int i = 0; i < cif->nargs; i++) {
 		FFI_Type *ptype = ftype->param_types[i];
 
-		if (ptype->kind == FFI_KIND_STRUCT) {
-			/* By-value struct callback argument: copy the bytes into a
+		if (ptype->kind == FFI_KIND_STRUCT || ptype->kind == FFI_KIND_UNION) {
+			/* By-value struct/union callback argument: copy the bytes into a
 			   GC-managed blob and pass the Ring function an FFI pointer */
 			size_t size = ptype->size > 0 ? ptype->size : 1;
 			void *copy = ring_state_malloc(state, size);
 			if (copy) {
 				memcpy(copy, args[i], size);
 				ring_list_addcustomringpointer_gc(state, cb->ctx->gc_list, copy, ffi_gc_free_ptr);
-				const char *name = (ptype->info.struct_type && ptype->info.struct_type->name)
-									   ? ptype->info.struct_type->name
-									   : "FFI_Ptr";
-				ring_list_addcpointer_gc(state, current_args, copy, name);
+				const char *name = NULL;
+				if (ptype->kind == FFI_KIND_STRUCT && ptype->info.struct_type)
+					name = ptype->info.struct_type->name;
+				else if (ptype->info.union_type)
+					name = ptype->info.union_type->name;
+				ring_list_addcpointer_gc(state, current_args, copy, name ? name : "FFI_Ptr");
 			} else {
 				ring_list_addcpointer_gc(state, current_args, NULL, "FFI_Ptr");
 			}
@@ -90,7 +92,18 @@ void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *user_data)
 
 			if (res_idx > 0 && res_idx <= ring_list_getsize(res_list)) {
 				FFI_Type *rtype = ftype->return_type;
-				if (rtype->kind == FFI_KIND_POINTER || rtype->pointer_depth > 0) {
+				if (rtype->kind == FFI_KIND_STRUCT || rtype->kind == FFI_KIND_UNION) {
+					/* By-value struct/union callback return: the Ring
+					   function returns a blob pointer; copy its bytes into
+					   libffi's return buffer (rets buffer is caller- or
+					   register-scratch owned, always writable here). */
+					if (ring_list_islist(res_list, res_idx)) {
+						List *ptr_list = ring_list_getlist(res_list, res_idx);
+						void *blob = ring_list_getpointer(ptr_list, RING_CPOINTER_POINTER);
+						if (blob)
+							memcpy(ret, blob, rtype->size > 0 ? rtype->size : 1);
+					}
+				} else if (rtype->kind == FFI_KIND_POINTER || rtype->pointer_depth > 0) {
 					if (ring_list_islist(res_list, res_idx)) {
 						List *ptr_list = ring_list_getlist(res_list, res_idx);
 						*(void **)ret = ring_list_getpointer(ptr_list, 1);

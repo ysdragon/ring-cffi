@@ -234,9 +234,12 @@ void ffi_push_struct_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype
 	}
 	memcpy(copy, src, size);
 	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, copy, ffi_gc_free_ptr);
-	const char *name = (rtype->info.struct_type && rtype->info.struct_type->name)
-						   ? rtype->info.struct_type->name
-						   : "FFI_Ptr";
+	const char *name = "FFI_Ptr";
+	if (rtype->kind == FFI_KIND_STRUCT && rtype->info.struct_type && rtype->info.struct_type->name)
+		name = rtype->info.struct_type->name;
+	else if (rtype->kind == FFI_KIND_UNION && rtype->info.union_type &&
+			 rtype->info.union_type->name)
+		name = rtype->info.union_type->name;
 	ring_vm_api_retcpointer(vm, copy, name);
 }
 

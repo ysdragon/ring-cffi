@@ -671,6 +671,32 @@ RING_FUNC(ring_cffi_union)
 	ut->size = FFI_ALIGN(max_size, max_align);
 	ut->alignment = max_align;
 
+	/* libffi has no FFI_TYPE_UNION: per its documentation a union is
+	   emulated as a struct whose size/alignment are preset to the union's
+	   real values (ffi_prep_cif only recomputes them when zero), so the ABI
+	   classification sees every member's type but the union layout. */
+	ut->ffi_elements =
+		(ffi_type **)ring_state_malloc(ctx->ring_state, sizeof(ffi_type *) * (ut->field_count + 1));
+	if (ut->ffi_elements) {
+		FFI_StructField *field = ut->fields;
+		int idx = 0;
+		while (field) {
+			if (field->type)
+				ut->ffi_elements[idx++] = field->type->ffi_type_ptr;
+			field = field->next;
+		}
+		ut->ffi_elements[idx] = NULL;
+		ut->ffi_type_def.type = FFI_TYPE_STRUCT;
+		ut->ffi_type_def.elements = ut->ffi_elements;
+		ut->ffi_type_def.size = ut->size;
+		ut->ffi_type_def.alignment = ut->alignment;
+	} else {
+		ut->ffi_type_def.type = FFI_TYPE_STRUCT;
+		ut->ffi_type_def.elements = NULL;
+		ut->ffi_type_def.size = ut->size;
+		ut->ffi_type_def.alignment = ut->alignment;
+	}
+
 	ring_hashtable_newpointer_gc(ctx->ring_state, ctx->unions, name, ut);
 
 	FFI_Type *type = (FFI_Type *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Type));
