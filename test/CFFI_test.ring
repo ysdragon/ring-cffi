@@ -147,6 +147,16 @@ class CFFITest
 			raise("Unknown OS for libc detection")
 		ok
 
+	func detectLibm
+		# NULL = no libm on this platform (by-value struct ARG test uses cabs)
+		if isWindows()
+			return NULL
+		but isMacOSX()
+			return cLibcPath
+		else
+			return "libm.so.6"
+		ok
+
 	func runAllTests
 		? "========================================"
 		? "     Ring CFFI Extension Test Suite     "
@@ -214,6 +224,19 @@ class CFFITest
 		run("test_struct_cdef_function", :test_struct_cdef_function)
 		run("test_nested_field_dot", :test_nested_field_dot)
 		run("test_bitfield_cdef", :test_bitfield_cdef)
+		? ""
+
+		? "Testing Struct By-Value..."
+		run("test_byval_div_return", :test_byval_div_return)
+		run("test_byval_ldiv_return", :test_byval_ldiv_return)
+		run("test_byval_lldiv_return", :test_byval_lldiv_return)
+		cLibmPath = detectLibm()
+		if !isNull(cLibmPath)
+			pLibm = new FFI(cLibmPath)
+			if !cffi_isnull(pLibm.sym("cabs"))
+				run("test_byval_cabs_arg", :test_byval_cabs_arg)
+			ok
+		ok
 		? ""
 
 		? "Testing Union Operations..."
@@ -838,6 +861,66 @@ class CFFITest
 
 	func test_callback_handler2 a, b
 		return a + b
+
+	# ==================== Struct By-Value Tests ====================
+
+	func test_byval_div_return
+		oTest = new FFI(cLibcPath)
+		oDivDef = cffi_struct("div_t", [["quot", "int"], ["rem", "int"]])
+		assertEq(cffi_struct_size(oDivDef), 8, "div_t should be 8 bytes on LP64")
+		assertEq(cffi_field_offset(oDivDef, "quot"), 0, "div_t.quot offset")
+		assertEq(cffi_field_offset(oDivDef, "rem"), 4, "div_t.rem offset")
+		oFunc = cffi_func(oTest.library(), "div", "div_t", ["int", "int"])
+		pRes = cffi_invoke(oFunc, [17, 5])
+		assertIsPointer(pRes, "div() should return a struct blob pointer")
+		assertEq(type(pRes), "div_t", "blob should be tagged with the struct name")
+		nQuot = cffi_get(cffi_field(pRes, oDivDef, "quot"), "int")
+		nRem = cffi_get(cffi_field(pRes, oDivDef, "rem"), "int")
+		assertEq(nQuot, 3, "div(17,5).quot should be 3")
+		assertEq(nRem, 2, "div(17,5).rem should be 2")
+		pNeg = cffi_invoke(oFunc, [-17, 5])
+		assertEq(cffi_get(cffi_field(pNeg, oDivDef, "quot"), "int"), -3, "div(-17,5).quot")
+		assertEq(cffi_get(cffi_field(pNeg, oDivDef, "rem"), "int"), -2, "div(-17,5).rem")
+
+	func test_byval_ldiv_return
+		oTest = new FFI(cLibcPath)
+		oDivDef = cffi_struct("ldiv_t", [["quot", "long"], ["rem", "long"]])
+		assertEq(cffi_struct_size(oDivDef), 2 * cffi_sizeof("long"), "ldiv_t layout")
+		oFunc = cffi_func(oTest.library(), "ldiv", "ldiv_t", ["long", "long"])
+		pRes = cffi_invoke(oFunc, [100000000, 3])
+		nQuot = cffi_get(cffi_field(pRes, oDivDef, "quot"), "long")
+		nRem = cffi_get(cffi_field(pRes, oDivDef, "rem"), "long")
+		assertEq(nQuot, 33333333, "ldiv(100000000,3).quot should be 33333333")
+		assertEq(nRem, 1, "ldiv(100000000,3).rem should be 1")
+
+	func test_byval_lldiv_return
+		oTest = new FFI(cLibcPath)
+		oDivDef = cffi_struct("lldiv_t", [["quot", "long long"], ["rem", "long long"]])
+		oFunc = cffi_func(oTest.library(), "lldiv", "lldiv_t", ["long long", "long long"])
+		# 64-bit args > 2^53 must be passed as STRINGS (exact bridging)
+		pRes = cffi_invoke(oFunc, ["9000000000000000005", "7"])
+		assertEq(cffi_get_i64(cffi_field(pRes, oDivDef, "quot")), "1285714285714285715",
+			"lldiv big quot (exact 64-bit)")
+		assertEq(cffi_get_i64(cffi_field(pRes, oDivDef, "rem")), "0", "lldiv big rem")
+		pSmall = cffi_invoke(oFunc, [100, 7])
+		assertEq(cffi_get_i64(cffi_field(pSmall, oDivDef, "quot")), "14", "lldiv small quot")
+		assertEq(cffi_get_i64(cffi_field(pSmall, oDivDef, "rem")), "2", "lldiv small rem")
+
+	func test_byval_cabs_arg
+		# 16-byte struct {double re; double im} passed BY VALUE to libm cabs
+		pLibm = cffi_load(detectLibm())
+		oCplx = cffi_struct("cplx", [["re", "double"], ["im", "double"]])
+		oFunc = cffi_func(pLibm, "cabs", "double", ["cplx"])
+		pC = cffi_new("cplx")
+		cffi_set(cffi_field(pC, oCplx, "re"), "double", 3.0)
+		cffi_set(cffi_field(pC, oCplx, "im"), "double", 4.0)
+		nRes = cffi_invoke(oFunc, [pC])
+		assert(nRes > 4.99 and nRes < 5.01, "cabs(3+4i) should be 5")
+		# mutate the same blob -> value is copied fresh on every call
+		cffi_set(cffi_field(pC, oCplx, "re"), "double", 1.0)
+		cffi_set(cffi_field(pC, oCplx, "im"), "double", 1.0)
+		nRes2 = cffi_invoke(oFunc, [pC])
+		assert(nRes2 > 1.41 and nRes2 < 1.42, "cabs(1+1i) should be ~1.414")
 
 	func test_callback_qsort
 		oTest = new FFI(cLibcPath)
