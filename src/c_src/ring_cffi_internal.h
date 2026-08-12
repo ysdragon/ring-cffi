@@ -319,6 +319,7 @@ double ffi_read_typed_value(void *src, FFI_Type *type);
 void ffi_write_typed_value(void *dst, FFI_Type *type, double val);
 void ffi_push_to_ring(VM *vm, void *src, FFI_Type *type, bool is_ffi_arg);
 void ffi_push_return_value(VM *vm, void *result_ptr, FFI_Type *rtype);
+void ffi_push_struct_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype);
 void ffi_ret_value(VM *vm, void *src, FFI_Type *type);
 bool ffi_parse_bitfield_tag(const char *tag, FFI_TypeKind *kind, int *bit_off, int *bit_w);
 void ffi_read_bitfield(VM *vm, FFI_Context *ctx, void *ptr, FFI_TypeKind bf_kind, int bit_off,

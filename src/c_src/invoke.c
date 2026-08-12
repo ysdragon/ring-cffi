@@ -67,6 +67,32 @@ int ffi_store_arg(FFI_Context *ctx, VM *pVM, List *aArgs, int i, int param_idx, 
 		return 0;
 	}
 
+	if (ptype && ptype->kind == FFI_KIND_STRUCT) {
+		/* By-value struct argument: the Ring side passes an FFI pointer to a
+		   buffer of the struct's size (e.g. from cffi_new or a previous
+		   by-value return); we copy the bytes so the ABI receives a value,
+		   not a pointer. */
+		void *ptr_val = NULL;
+		if (aArgs) {
+			if (ring_list_islist(aArgs, i + 1)) {
+				List *argList = ring_list_getlist(aArgs, i + 1);
+				ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+			}
+		} else {
+			if (ring_vm_api_iscpointer((void *)pVM, param_idx)) {
+				List *argList = ring_vm_api_getlist((void *)pVM, param_idx);
+				ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+			}
+		}
+		if (!ptr_val) {
+			ring_vm_error(pVM, "struct-by-value argument requires an FFI pointer to the struct");
+			return -1;
+		}
+		memcpy(storage_ptr, ptr_val, ptype->size > 0 ? ptype->size : 1);
+		*out_size = ptype->size > 0 ? ptype->size : sizeof(int);
+		return 0;
+	}
+
 	if (is_num) {
 		double val = aArgs ? ring_list_getdouble(aArgs, i + 1)
 						   : ring_vm_api_getnumber((void *)pVM, param_idx);
@@ -225,31 +251,46 @@ int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 	}
 
 	{
-		union {
-			ffi_arg u;
-			int8_t i8;
-			uint8_t u8;
-			int16_t i16;
-			uint16_t u16;
-			int32_t i32;
-			uint32_t u32;
-			int64_t i64;
-			uint64_t u64;
-			float f;
-			double d;
-			long double ld;
-			void *p;
-		} result;
+		FFI_Type *ret_type = func->type->return_type;
+		if (ret_type && ret_type->kind == FFI_KIND_STRUCT) {
+			/* By-value struct return: libffi writes the whole struct into a
+			   caller-provided buffer of the struct's size; the scalar union
+			   below would overflow for anything larger than 16 bytes. */
+			size_t ret_size = ret_type->size > 0 ? ret_type->size : 1;
+			void *ret_buf = ring_state_calloc(ctx->ring_state, 1, ret_size);
+			if (!ret_buf) {
+				ring_vm_error(pVM, "out of memory");
+				goto cleanup;
+			}
+			ffi_call(&func->cif, FFI_FN(func->func_ptr), ret_buf, arg_values);
+			ffi_push_struct_return(ctx, pVM, ret_buf, ret_type);
+			ring_state_free(ctx->ring_state, ret_buf);
+		} else {
+			union {
+				ffi_arg u;
+				int8_t i8;
+				uint8_t u8;
+				int16_t i16;
+				uint16_t u16;
+				int32_t i32;
+				uint32_t u32;
+				int64_t i64;
+				uint64_t u64;
+				float f;
+				double d;
+				long double ld;
+				void *p;
+			} result;
 
-		memset(&result, 0, sizeof(result));
-		ffi_call(&func->cif, FFI_FN(func->func_ptr), &result, arg_values);
+			memset(&result, 0, sizeof(result));
+			ffi_call(&func->cif, FFI_FN(func->func_ptr), &result, arg_values);
+			ffi_push_return_value(pVM, &result, ret_type);
+		}
 
 		if (arg_storage)
 			ring_state_free(ctx->ring_state, arg_storage);
 		if (arg_values)
 			ring_state_free(ctx->ring_state, arg_values);
-
-		ffi_push_return_value(pVM, &result, func->type->return_type);
 		return 0;
 	}
 
@@ -368,24 +409,44 @@ int ffi_call_variadic(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 		return -1;
 	}
 
-	union {
-		ffi_arg u;
-		int8_t i8;
-		uint8_t u8;
-		int16_t i16;
-		uint16_t u16;
-		int32_t i32;
-		uint32_t u32;
-		int64_t i64;
-		uint64_t u64;
-		float f;
-		double d;
-		long double ld;
-		void *p;
-	} result;
-	memset(&result, 0, sizeof(result));
+	FFI_Type *ret_type = func->type->return_type;
+	if (ret_type && ret_type->kind == FFI_KIND_STRUCT) {
+		size_t ret_size = ret_type->size > 0 ? ret_type->size : 1;
+		void *ret_buf = ring_state_calloc(ctx->ring_state, 1, ret_size);
+		if (!ret_buf) {
+			if (arg_types)
+				ring_state_free(ctx->ring_state, arg_types);
+			if (arg_values)
+				ring_state_free(ctx->ring_state, arg_values);
+			if (arg_storage)
+				ring_state_free(ctx->ring_state, arg_storage);
+			ring_vm_error(pVM, "out of memory");
+			return -1;
+		}
+		ffi_call(&var_cif, FFI_FN(func->func_ptr), ret_buf, arg_values);
+		ffi_push_struct_return(ctx, pVM, ret_buf, ret_type);
+		ring_state_free(ctx->ring_state, ret_buf);
+	} else {
+		union {
+			ffi_arg u;
+			int8_t i8;
+			uint8_t u8;
+			int16_t i16;
+			uint16_t u16;
+			int32_t i32;
+			uint32_t u32;
+			int64_t i64;
+			uint64_t u64;
+			float f;
+			double d;
+			long double ld;
+			void *p;
+		} result;
+		memset(&result, 0, sizeof(result));
 
-	ffi_call(&var_cif, FFI_FN(func->func_ptr), &result, arg_values);
+		ffi_call(&var_cif, FFI_FN(func->func_ptr), &result, arg_values);
+		ffi_push_return_value(pVM, &result, ret_type);
+	}
 
 	if (arg_types)
 		ring_state_free(ctx->ring_state, arg_types);
@@ -394,7 +455,6 @@ int ffi_call_variadic(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 	if (arg_storage)
 		ring_state_free(ctx->ring_state, arg_storage);
 
-	ffi_push_return_value(pVM, &result, func->type->return_type);
 	return 0;
 }
 

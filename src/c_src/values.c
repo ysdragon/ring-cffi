@@ -220,6 +220,26 @@ void ffi_push_return_value(VM *vm, void *result_ptr, FFI_Type *rtype)
 	ffi_push_to_ring(vm, result_ptr, rtype, true);
 }
 
+void ffi_push_struct_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype)
+{
+	/* Copy the struct bytes into a GC-managed blob and hand it to Ring as an
+	   FFI pointer. Field access goes through cffi_field + cffi_get/set; the
+	   same blob can be passed back into a function that takes the struct by
+	   value (ffi_store_arg copies it again). */
+	size_t size = rtype->size > 0 ? rtype->size : 1;
+	void *copy = ring_state_malloc(ctx->ring_state, size);
+	if (!copy) {
+		ring_vm_error(vm, "out of memory");
+		return;
+	}
+	memcpy(copy, src, size);
+	ring_list_addcustomringpointer_gc(ctx->ring_state, ctx->gc_list, copy, ffi_gc_free_ptr);
+	const char *name = (rtype->info.struct_type && rtype->info.struct_type->name)
+						   ? rtype->info.struct_type->name
+						   : "FFI_Ptr";
+	ring_vm_api_retcpointer(vm, copy, name);
+}
+
 void ffi_ret_value(VM *vm, void *src, FFI_Type *type) { ffi_push_to_ring(vm, src, type, false); }
 
 bool ffi_parse_bitfield_tag(const char *tag, FFI_TypeKind *kind, int *bit_off, int *bit_w)

@@ -39,7 +39,22 @@ void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *user_data)
 	for (int i = 0; i < cif->nargs; i++) {
 		FFI_Type *ptype = ftype->param_types[i];
 
-		if (ptype->kind == FFI_KIND_STRING && ptype->pointer_depth == 0) {
+		if (ptype->kind == FFI_KIND_STRUCT) {
+			/* By-value struct callback argument: copy the bytes into a
+			   GC-managed blob and pass the Ring function an FFI pointer */
+			size_t size = ptype->size > 0 ? ptype->size : 1;
+			void *copy = ring_state_malloc(state, size);
+			if (copy) {
+				memcpy(copy, args[i], size);
+				ring_list_addcustomringpointer_gc(state, cb->ctx->gc_list, copy, ffi_gc_free_ptr);
+				const char *name = (ptype->info.struct_type && ptype->info.struct_type->name)
+									   ? ptype->info.struct_type->name
+									   : "FFI_Ptr";
+				ring_list_addcpointer_gc(state, current_args, copy, name);
+			} else {
+				ring_list_addcpointer_gc(state, current_args, NULL, "FFI_Ptr");
+			}
+		} else if (ptype->kind == FFI_KIND_STRING && ptype->pointer_depth == 0) {
 			char *str_val = *(char **)args[i];
 			if (str_val)
 				ring_list_addstring_gc(state, current_args, str_val);
