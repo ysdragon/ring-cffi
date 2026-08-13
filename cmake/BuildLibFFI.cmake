@@ -16,10 +16,32 @@ elseif(WIN32 OR MINGW)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-deprecated-declarations -Wno-pointer-to-int-cast")
 endif()
 
-# config variables for ffi.h.in
-set(VERSION 3.5.2)
-set(FFI_VERSION_STRING "3.5.2")
-set(FFI_VERSION_NUMBER 30502)
+# config variables for ffi.h.in — derived from the libffi tree itself so they
+# cannot drift when the submodule is bumped (libffi does the same: its
+# configure.ac derives the version macros from AC_INIT). The fallback fetch
+# tag in CMakeLists.txt must still be updated manually to match.
+file(STRINGS "${FFI_ROOT}/configure.ac" _ffi_acinit
+    REGEX "^AC_INIT\\(\\[libffi\\],\\[[0-9.]+\\]")
+if(NOT _ffi_acinit)
+    message(FATAL_ERROR "Cannot determine libffi version from ${FFI_ROOT}/configure.ac")
+endif()
+string(REGEX MATCH "\\[([0-9.]+)\\]" _ffi_ver_match "${_ffi_acinit}")
+if(NOT _ffi_ver_match)
+    message(FATAL_ERROR "Cannot parse libffi version from: ${_ffi_acinit}")
+endif()
+set(VERSION "${CMAKE_MATCH_1}")
+string(REPLACE "." ";" _ffi_ver_parts "${VERSION}")
+list(GET _ffi_ver_parts 0 _ffi_ver_major)
+list(GET _ffi_ver_parts 1 _ffi_ver_minor)
+list(LENGTH _ffi_ver_parts _ffi_ver_len)
+if(_ffi_ver_len GREATER 2)
+    list(GET _ffi_ver_parts 2 _ffi_ver_micro)
+else()
+    set(_ffi_ver_micro 0)
+endif()
+math(EXPR FFI_VERSION_NUMBER "${_ffi_ver_major}*10000 + ${_ffi_ver_minor}*100 + ${_ffi_ver_micro}")
+set(FFI_VERSION_STRING "${VERSION}")
+message(STATUS "libffi version: ${VERSION} (${FFI_VERSION_NUMBER})")
 
 set(KNOWN_PROCESSORS x86 x86_64 amd64 arm arm64 i386 i686 armv7l armv7-a aarch64)
 
@@ -55,7 +77,7 @@ else()
     message(FATAL_ERROR "Cannot determine target. Please consult ${FFI_ROOT}/configure.ac and add your platform to this CMake file.")
 endif()
 
-# ---- Detect platform-specific values for fficonfig.h ----
+# Detect platform-specific values for fficonfig.h
 
 # sizeof checks
 include(CheckTypeSize)
@@ -92,41 +114,32 @@ else()
     set(HAVE_HIDDEN_VISIBILITY_ATTRIBUTE 1)
 endif()
 
-# read-only eh_frame
-if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
-    set(HAVE_RO_EH_FRAME 1)
-endif()
-
-# assembler features (GCC/Clang only, not MSVC)
-if(NOT MSVC)
-    set(HAVE_AS_X86_PCREL 1)
-    if(CMAKE_SYSTEM_NAME MATCHES "Linux")
-        set(HAVE_AS_CFI_PSEUDO_OP 1)
-        set(HAVE_AS_X86_64_UNWIND_SECTION_TYPE 1)
-    elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
-        set(HAVE_AS_CFI_PSEUDO_OP 1)
-    endif()
-endif()
-
 # symbol underscore (macOS prefixes symbols with _)
 if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
     set(SYMBOL_UNDERSCORE 1)
 endif()
 
-# trampoline table (Apple arm64)
-if(CMAKE_SYSTEM_NAME MATCHES "Darwin" AND lower_system_processor MATCHES "arm64|aarch64")
+# trampoline table — mirrors configure.ac: *arm*-apple-* | aarch64-apple-*
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin" AND lower_system_processor MATCHES "arm|aarch64")
     set(FFI_EXEC_TRAMPOLINE_TABLE 1)
 else()
     set(FFI_EXEC_TRAMPOLINE_TABLE 0)
 endif()
 
-# static trampolines (Linux only)
-if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+# static trampolines — mirrors configure.ac's default-on case list:
+# cygwin/msys (GNU toolchain) and *-linux-* (incl. Android)
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
+    set(FFI_EXEC_STATIC_TRAMP 1)
+elseif(CMAKE_SYSTEM_NAME MATCHES "Cygwin|MSYS" AND NOT MSVC)
     set(FFI_EXEC_STATIC_TRAMP 1)
 endif()
 
-# mmap exec writ (need W+X mappings for closures)
-if(NOT WIN32 OR MINGW)
+# Cannot use malloc on this target, so revert to alternative means — mirrors
+# configure.ac: *-apple-* | *-*-dragonfly* | *-*-freebsd* | *-*-kfreebsd* |
+# *-*-openbsd* | *-pc-solaris* | *-linux-android*. Deliberately NOT defined on
+# plain Linux/Cygwin/Windows: closures.c self-defines it there when needed
+# (#if !FFI_MMAP_EXEC_WRIT && !FFI_EXEC_TRAMPOLINE_TABLE ... __linux__ / _WIN32).
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin|DragonFly|FreeBSD|OpenBSD|Solaris|Android")
     set(FFI_MMAP_EXEC_WRIT 1)
 endif()
 
@@ -135,7 +148,118 @@ if(MSVC)
     set(LACKS_STDLIB_H 1)
 endif()
 
-# ---- Generate fficonfig.h from template ----
+# Autotools-parity probes (mirror configure.ac / acinclude.m4)
+
+# __int128_t type existence -> HAVE_INT128 (configure.ac AC_CHECK_TYPE)
+include(CheckTypeSize)
+check_type_size("__int128_t" SIZEOF_INT128_TYPE LANGUAGE C)
+if(SIZEOF_INT128_TYPE)
+    set(HAVE_INT128 1)
+endif()
+
+# Big-endian detection -> WORDS_BIGENDIAN (AC_C_BIGENDIAN)
+include(TestBigEndian)
+test_big_endian(_IS_BIG_ENDIAN)
+if(_IS_BIG_ENDIAN)
+    set(WORDS_BIGENDIAN 1)
+endif()
+
+# Assembler .cfi_* pseudo-ops (acinclude.m4 GCC_AS_CFI_PSEUDO_OP). NOT for
+# MSVC: sysv_intel.S / win64_intel.S include ffi_cfi.h, and with the macro
+# defined the cfi_* calls expand to GAS .cfi_* directives, which MASM
+# rejects (error A2008). Only the gas/clang toolchains probe it.
+set(_asm_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/asm_probes")
+file(MAKE_DIRECTORY "${_asm_probe_dir}")
+if(NOT MSVC)
+    file(WRITE "${_asm_probe_dir}/cfi.s"
+        ".text\n.globl main\nmain:\n\t.cfi_startproc\n\tret\n\t.cfi_endproc\n")
+    try_compile(_ASM_CFI_OK "${_asm_probe_dir}/try_cfi" "${_asm_probe_dir}/cfi.s"
+        OUTPUT_VARIABLE _cfi_probe_out)
+    if(_ASM_CFI_OK)
+        set(HAVE_AS_CFI_PSEUDO_OP 1)
+    endif()
+endif()
+
+# assembler supports PC relative relocs -> HAVE_AS_X86_PCREL
+# (configure.ac case X86*); machine-independent, so gate on the target family
+if(NOT MSVC AND ("${TARGET}" MATCHES "^X86"))
+    file(WRITE "${_asm_probe_dir}/pcrel.s"
+        ".text\nfoo: nop\n.data\n.long foo-.\n.text\n.globl main\nmain:\n\tret\n")
+    try_compile(_ASM_X86_PCREL_OK "${_asm_probe_dir}/try_pcrel" "${_asm_probe_dir}/pcrel.s"
+        OUTPUT_VARIABLE _pcrel_probe_out)
+    if(_ASM_X86_PCREL_OK)
+        set(HAVE_AS_X86_PCREL 1)
+    endif()
+endif()
+
+# toolchain supports the @unwind section type -> HAVE_AS_X86_64_UNWIND_SECTION_TYPE
+# (configure.ac gates this on TARGET == X86_64 and probes with
+#  -Wa,--fatal-warnings; @unwind is invalid on 32-bit x86, hence the gate)
+if(NOT MSVC AND "${TARGET}" STREQUAL "X86_64")
+    file(WRITE "${_asm_probe_dir}/unwind.s"
+        ".section .eh_frame,\"a\",@unwind\n.text\n.globl main\nmain:\n\tret\n")
+    try_compile(_ASM_UNWIND_OK "${_asm_probe_dir}/try_unwind" "${_asm_probe_dir}/unwind.s"
+        CMAKE_FLAGS "-DCMAKE_ASM_FLAGS=-Wa,--fatal-warnings"
+        OUTPUT_VARIABLE _unwind_probe_out)
+    if(_ASM_UNWIND_OK)
+        set(HAVE_AS_X86_64_UNWIND_SECTION_TYPE 1)
+    endif()
+endif()
+
+# compiler supports pointer authentication -> HAVE_ARM64E_PTRAUTH
+# (configure.ac AC_COMPILE_IFELSE with __has_feature(ptrauth_calls))
+include(CheckCSourceCompiles)
+# NB: the result variable must NOT be the macro the snippet tests — newer CMake
+# compiles the check with -D<result-var>, which would satisfy the #ifndef and
+# make the probe a guaranteed false positive.
+check_c_source_compiles(
+"#ifdef __clang__
+# if __has_feature(ptrauth_calls)
+#  define HAVE_ARM64E_PTRAUTH 1
+# endif
+#endif
+#ifndef HAVE_ARM64E_PTRAUTH
+# error Pointer authentication not supported
+#endif
+int main(void) { return 0; }"
+HAVE_ARM64E_PTRAUTH_COMPILE)
+unset(HAVE_ARM64E_PTRAUTH CACHE)
+if(HAVE_ARM64E_PTRAUTH_COMPILE)
+    set(HAVE_ARM64E_PTRAUTH 1)
+endif()
+
+# whether .eh_frame should be read-only -> HAVE_RO_EH_FRAME + EH_FRAME_FLAGS
+# (configure.ac libffi_cv_ro_eh_frame: compile -fpic -fexceptions and inspect
+#  with readelf; falls back to read-only "a" when the probe cannot run)
+set(HAVE_RO_EH_FRAME 1)
+set(_EH_FRAME_FLAGS "a")
+if(NOT MSVC)
+    find_program(READELF readelf greadelf)
+    set(_eh_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/eh_probe")
+    file(MAKE_DIRECTORY "${_eh_probe_dir}")
+    file(WRITE "${_eh_probe_dir}/eh.c"
+        "extern void foo (void); void bar (void) { foo (); foo (); }\n")
+    execute_process(
+        COMMAND ${CMAKE_C_COMPILER} -c -fpic -fexceptions -fno-lto
+                "${_eh_probe_dir}/eh.c" -o "${_eh_probe_dir}/eh.o"
+        RESULT_VARIABLE _eh_probe_rc OUTPUT_QUIET ERROR_QUIET
+    )
+    if(_eh_probe_rc EQUAL 0 AND READELF)
+        execute_process(
+            COMMAND "${READELF}" -WS "${_eh_probe_dir}/eh.o"
+            OUTPUT_VARIABLE _eh_probe_out RESULT_VARIABLE _eh_readelf_rc ERROR_QUIET
+        )
+        if(_eh_readelf_rc EQUAL 0)
+            string(REGEX MATCH "eh_frame[^\n]*WA" _eh_frame_writable "${_eh_probe_out}")
+            if(_eh_frame_writable)
+                set(HAVE_RO_EH_FRAME "")
+                set(_EH_FRAME_FLAGS "aw")
+            endif()
+        endif()
+    endif()
+endif()
+
+# Generate fficonfig.h from template
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/include")
 configure_file(${FFI_ROOT}/include/ffi.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/ffi.h)
 
@@ -262,7 +386,10 @@ macro(ffi_add_assembly ASMFILE)
     endif()
 endmacro()
 
-if("${TARGET}" STREQUAL "X86")
+# 32-bit x86 targets need -m32 for the assembler even when the C compiler is
+# already 32-bit (sysv.S would otherwise be assembled as 64-bit object code)
+if("${TARGET}" STREQUAL "X86" OR "${TARGET}" STREQUAL "X86_DARWIN"
+   OR "${TARGET}" STREQUAL "X86_FREEBSD")
     set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -m32")
 endif()
 

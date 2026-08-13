@@ -27,6 +27,9 @@
 /* Define if you support more than one size of the long double type */
 #cmakedefine HAVE_LONG_DOUBLE_VARIANT 1
 
+/* Define if the __int128_t type is available */
+#cmakedefine HAVE_INT128 1
+
 /* Define if memfd_create is available */
 #cmakedefine HAVE_MEMFD_CREATE 1
 
@@ -146,7 +149,7 @@
 #cmakedefine HAVE_AS_REGISTER_PSEUDO_OP 1
 
 /* Define if your assembler supports unaligned PC relative relocs. */
-#cmakedefine HAVE_AS_SPARC_UA_PREl 1
+#cmakedefine HAVE_AS_SPARC_UA_PCREL 1
 
 /* Define if the compiler uses zarch features. */
 #cmakedefine HAVE_AS_S390_ZARCH 1
@@ -166,12 +169,8 @@
 /* Define this if you are using Purify and want to suppress spurious messages. */
 #cmakedefine USING_PURIFY 1
 
-/* Define if .eh_frame sections should be read-only. */
-#ifdef __linux__
-#define EH_FRAME_FLAGS "a"
-#elif defined(__APPLE__)
-#define EH_FRAME_FLAGS "a"
-#endif
+/* Define to the flags needed for the .section .eh_frame directive. */
+#define EH_FRAME_FLAGS "@_EH_FRAME_FLAGS@"
 
 /* FFI_HIDDEN definition */
 #ifdef HAVE_HIDDEN_VISIBILITY_ATTRIBUTE
