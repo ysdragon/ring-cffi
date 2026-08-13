@@ -35,6 +35,7 @@
  class FFI
 
     self.pLib = NULL
+    self.cAbi = NULL
 
     /**
      * Creates a new FFI instance, optionally loading a library.
@@ -72,6 +73,20 @@
      */
 
     /**
+     * Sets the calling-convention ABI used by subsequently created functions.
+     *
+     *   oFFI.setAbi("stdcall")
+     *   oFunc = oFFI.cFunc("MessageBoxA", "int", ["ptr", "ptr", "ptr", "uint"])
+     *
+     * @param cAbi ABI name ("default", "sysv", "stdcall", "thiscall",
+     *             "fastcall", "ms_cdecl", "win64", ... platform-dependent).
+     * @return Self for method chaining.
+     */
+    func setAbi cAbi
+        self.cAbi = cAbi
+        return self
+
+    /**
      * Creates a callable C function wrapper.
      * @param cName Name of the C function in the library.
      * @param cRetType Return type (e.g., "int", "void", "string", "ptr").
@@ -84,12 +99,12 @@
             raise("No library loaded. Call loadLib() first.")
         ok
         if isNull(aArgTypes)
-            return cffi_func(pLib, cName, cRetType)
+            return cffi_func(pLib, cName, cRetType, NULL, cAbi)
         ok
         if isList(aArgTypes)
-            return cffi_func(pLib, cName, cRetType, aArgTypes)
+            return cffi_func(pLib, cName, cRetType, aArgTypes, cAbi)
         ok
-        return cffi_func(pLib, cName, cRetType, aArgTypes)
+        return cffi_func(pLib, cName, cRetType, aArgTypes, cAbi)
 
     /**
      * Creates a callable function from a raw function pointer.
@@ -100,9 +115,9 @@
      */
     func funcPtr pPtr, cRetType, aArgTypes
         if isNull(aArgTypes)
-            return cffi_funcptr(pPtr, cRetType)
+            return cffi_funcptr(pPtr, cRetType, NULL, cAbi)
         ok
-        return cffi_funcptr(pPtr, cRetType, aArgTypes)
+        return cffi_funcptr(pPtr, cRetType, aArgTypes, cAbi)
 
     /**
      * Creates a variadic function wrapper (supports variable arguments).
@@ -116,9 +131,9 @@
             raise("No library loaded. Call loadLib() first.")
         ok
         if isNull(aArgTypes)
-            return cffi_varfunc(pLib, cName, cRetType)
+            return cffi_varfunc(pLib, cName, cRetType, NULL, cAbi)
         ok
-        return cffi_varfunc(pLib, cName, cRetType, aArgTypes)
+        return cffi_varfunc(pLib, cName, cRetType, aArgTypes, cAbi)
 
     /*
      * ========================================
@@ -215,6 +230,58 @@
             cffi_set_i64(pPtr, cValue)
         else
             cffi_set_i64(pPtr, cValue, nIndex)
+        ok
+
+    /**
+     * Reads a 128-bit integer from a pointer as a string to avoid precision loss.
+     * @param pPtr Pointer to read from.
+     * @param nIndex Array index (pass NULL for none).
+     * @param nUnsigned 1 for unsigned __int128 (pass 0 for signed).
+     * @return The 128-bit integer as a Ring string.
+     */
+    func i128Get pPtr, nIndex, nUnsigned
+        if isNull(nIndex)
+            return cffi_get_i128(pPtr, NULL, nUnsigned)
+        ok
+        return cffi_get_i128(pPtr, nIndex, nUnsigned)
+
+    /**
+     * Writes a 128-bit integer to a pointer from a string to avoid precision loss.
+     * @param pPtr Pointer to write to.
+     * @param cValue 128-bit integer as a Ring string.
+     * @param nIndex Array index (pass NULL for none).
+     * @param nUnsigned 1 for unsigned __int128 (pass 0 for signed).
+     */
+    func i128Set pPtr, cValue, nIndex, nUnsigned
+        if isNull(nIndex)
+            cffi_set_i128(pPtr, cValue, NULL, nUnsigned)
+        else
+            cffi_set_i128(pPtr, cValue, nIndex, nUnsigned)
+        ok
+
+    /**
+     * Reads a long double from a pointer as a string to avoid precision loss.
+     * @param pPtr Pointer to read from.
+     * @param nIndex Optional array index.
+     * @return The long double as a decimal string (21 significant digits).
+     */
+    func ldGet pPtr, nIndex
+        if isNull(nIndex)
+            return cffi_get_ld(pPtr)
+        ok
+        return cffi_get_ld(pPtr, nIndex)
+
+    /**
+     * Writes a long double to a pointer from a string to avoid precision loss.
+     * @param pPtr Pointer to write to.
+     * @param cValue long double as a decimal string.
+     * @param nIndex Optional array index.
+     */
+    func ldSet pPtr, cValue, nIndex
+        if isNull(nIndex)
+            cffi_set_ld(pPtr, cValue)
+        else
+            cffi_set_ld(pPtr, cValue, nIndex)
         ok
 
     /**
@@ -470,9 +537,9 @@
      */
     func callback cRingFunc, cRetType, aArgTypes
         if isNull(aArgTypes)
-            return cffi_callback(cRingFunc, cRetType)
+            return cffi_callback(cRingFunc, cRetType, NULL, cAbi)
         ok
-        return cffi_callback(cRingFunc, cRetType, aArgTypes)
+        return cffi_callback(cRingFunc, cRetType, aArgTypes, cAbi)
 
     /*
      * ========================================
@@ -537,9 +604,9 @@
             raise("No library loaded. Call loadLib() first.")
         ok
         if isNull(aArgTypes)
-            return cffi_bind(pLib, cName, cRetType)
+            return cffi_bind(pLib, cName, cRetType, NULL, cAbi)
         ok
-        return cffi_bind(pLib, cName, cRetType, aArgTypes)
+        return cffi_bind(pLib, cName, cRetType, aArgTypes, cAbi)
 
     /**
      * Binds ALL functions declared via cdef() as native Ring functions.
