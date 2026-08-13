@@ -17,6 +17,7 @@ static void cparser_init(CParser *p, FFI_Context *ctx, FFI_Library *lib, const c
 	p->error[0] = '\0';
 	p->result_list = ring_list_new_gc(ctx->ring_state, 0);
 	p->decl_count = 0;
+	p->pending_abi = FFI_DEFAULT_ABI;
 }
 
 static void cparser_free(CParser *p)
@@ -106,22 +107,60 @@ static bool cparser_number(CParser *p, int64_t *val)
 	return true;
 }
 
+/* Map a calling-convention keyword to the libffi ABI it implies on this
+   platform. Conventions that are unified into the platform default (e.g.
+   __stdcall on x86-64, where all calling conventions share one ABI) map to
+   FFI_DEFAULT_ABI. */
+static ffi_abi cparser_convention_abi(const char *name)
+{
+#if defined(__i386__) || defined(_M_IX86)
+	if (strcmp(name, "__stdcall") == 0 || strcmp(name, "_stdcall") == 0 ||
+		strcmp(name, "WINAPI") == 0 || strcmp(name, "APIENTRY") == 0)
+		return FFI_STDCALL;
+	if (strcmp(name, "__fastcall") == 0 || strcmp(name, "_fastcall") == 0)
+		return FFI_FASTCALL;
+	if (strcmp(name, "__thiscall") == 0 || strcmp(name, "_thiscall") == 0)
+		return FFI_THISCALL;
+#else
+	(void)name;
+#endif
+	/* __cdecl/_cdecl, CALLBACK, WINAPIV and everything on unified-ABI
+	   platforms: the platform default. */
+	return FFI_DEFAULT_ABI;
+}
+
 static void cparser_skip_attributes(CParser *p)
 {
 	while (true) {
 		cparser_skip_ws(p);
+
+		if (cparser_match(p, "__stdcall") || cparser_match(p, "_stdcall")) {
+			p->pending_abi = cparser_convention_abi("__stdcall");
+			continue;
+		}
+		if (cparser_match(p, "__cdecl") || cparser_match(p, "_cdecl")) {
+			p->pending_abi = cparser_convention_abi("__cdecl");
+			continue;
+		}
+		if (cparser_match(p, "__fastcall") || cparser_match(p, "_fastcall")) {
+			p->pending_abi = cparser_convention_abi("__fastcall");
+			continue;
+		}
+		if (cparser_match(p, "__thiscall") || cparser_match(p, "_thiscall")) {
+			p->pending_abi = cparser_convention_abi("__thiscall");
+			continue;
+		}
+		if (cparser_match(p, "WINAPI") || cparser_match(p, "APIENTRY")) {
+			p->pending_abi = cparser_convention_abi("WINAPI");
+			continue;
+		}
 
 		if (cparser_match(p, "const") || cparser_match(p, "volatile") ||
 			cparser_match(p, "restrict") || cparser_match(p, "__restrict") ||
 			cparser_match(p, "extern") || cparser_match(p, "static") ||
 			cparser_match(p, "inline") || cparser_match(p, "__inline") ||
 			cparser_match(p, "__inline__") || cparser_match(p, "__forceinline") ||
-			cparser_match(p, "__stdcall") || cparser_match(p, "_stdcall") ||
-			cparser_match(p, "__cdecl") || cparser_match(p, "_cdecl") ||
-			cparser_match(p, "__fastcall") || cparser_match(p, "_fastcall") ||
-			cparser_match(p, "__thiscall") || cparser_match(p, "_thiscall") ||
 			cparser_match(p, "__ptr32") || cparser_match(p, "__ptr64") ||
-			cparser_match(p, "WINAPI") || cparser_match(p, "APIENTRY") ||
 			cparser_match(p, "CALLBACK") || cparser_match(p, "WINAPIV")) {
 			continue;
 		}
@@ -148,6 +187,9 @@ static void cparser_skip_attributes(CParser *p)
 
 static void cparser_type(CParser *p, char *out, size_t sz)
 {
+	/* Calling conventions belong to function declarators, never to types:
+	   keep any pending convention alive across the type token run. */
+	ffi_abi abi_save = p->pending_abi;
 	cparser_skip_attributes(p);
 	size_t i = 0;
 	out[0] = '\0';
@@ -156,6 +198,7 @@ static void cparser_type(CParser *p, char *out, size_t sz)
 	int long_count = 0;
 	bool has_short = false;
 	bool has_struct = false, has_union = false, has_enum = false;
+	bool has_complex = false, has_int128 = false;
 	char base_type[512] = "";
 
 	while (true) {
@@ -174,6 +217,14 @@ static void cparser_type(CParser *p, char *out, size_t sz)
 		}
 		if (cparser_match(p, "short")) {
 			has_short = true;
+			continue;
+		}
+		if (cparser_match(p, "_Complex")) {
+			has_complex = true;
+			continue;
+		}
+		if (cparser_match(p, "__int128") || cparser_match(p, "int128")) {
+			has_int128 = true;
 			continue;
 		}
 		if (cparser_match(p, "struct")) {
@@ -199,7 +250,8 @@ static void cparser_type(CParser *p, char *out, size_t sz)
 
 	cparser_skip_attributes(p);
 
-	bool has_modifier = has_signed || has_unsigned || long_count > 0 || has_short;
+	bool has_modifier =
+		has_signed || has_unsigned || long_count > 0 || has_short || has_complex || has_int128;
 	bool has_tag = has_struct || has_union || has_enum;
 
 	char peek_ident[512] = "";
@@ -213,7 +265,7 @@ static void cparser_type(CParser *p, char *out, size_t sz)
 		consume_ident = true;
 	} else if (has_modifier) {
 		if (strcmp(peek_ident, "int") == 0 || strcmp(peek_ident, "char") == 0 ||
-			strcmp(peek_ident, "double") == 0) {
+			strcmp(peek_ident, "float") == 0 || strcmp(peek_ident, "double") == 0) {
 			consume_ident = true;
 		}
 	} else {
@@ -226,7 +278,20 @@ static void cparser_type(CParser *p, char *out, size_t sz)
 		p->pos = save_pos;
 	}
 
-	if (has_enum) {
+	if (has_complex) {
+		if (long_count == 1 && strcmp(base_type, "double") == 0) {
+			snprintf(out, sz, "_Complex long double");
+		} else if (strcmp(base_type, "float") == 0) {
+			snprintf(out, sz, "_Complex float");
+		} else if (strcmp(base_type, "double") == 0 || !base_type[0]) {
+			/* C99: bare _Complex means _Complex double */
+			snprintf(out, sz, "_Complex double");
+		} else {
+			snprintf(out, sz, "_Complex %s", base_type);
+		}
+	} else if (has_int128) {
+		snprintf(out, sz, has_unsigned ? "unsigned __int128" : "__int128");
+	} else if (has_enum) {
 		snprintf(out, sz, "int");
 	} else if (long_count >= 2) {
 		snprintf(out, sz, has_unsigned ? "unsigned long long" : "long long");
@@ -268,6 +333,8 @@ static void cparser_type(CParser *p, char *out, size_t sz)
 	if ((has_struct || has_union) && strchr(out, '*')) {
 		snprintf(out, sz, "ptr");
 	}
+
+	p->pending_abi = abi_save;
 }
 
 static bool cparser_parse_struct(CParser *p, bool is_union)
@@ -591,6 +658,8 @@ static bool cparser_parse_typedef(CParser *p)
 		if (t) {
 			ring_hashtable_newpointer_gc(p->ctx->ring_state, p->ctx->type_cache, alias, t);
 		}
+		/* The convention belonged to the typedef, not a callable */
+		p->pending_abi = FFI_DEFAULT_ABI;
 		p->decl_count++;
 		return true;
 	}
@@ -741,6 +810,7 @@ finish_func:
 
 	if (!p->lib) {
 		p->decl_count++;
+		p->pending_abi = FFI_DEFAULT_ABI;
 		return true;
 	}
 
@@ -762,6 +832,7 @@ finish_func:
 		ft->return_type = ret_ffi;
 		ft->param_count = param_count;
 		ft->is_variadic = true;
+		ft->abi = p->pending_abi;
 		if (param_count > 0) {
 			ft->param_types = (FFI_Type **)ring_state_malloc(p->ctx->ring_state,
 															 sizeof(FFI_Type *) * param_count);
@@ -778,6 +849,7 @@ finish_func:
 		ring_list_addcustomringpointer_gc(p->ctx->ring_state, p->ctx->gc_list, func,
 										  ffi_gc_free_func);
 		p->decl_count++;
+		p->pending_abi = FFI_DEFAULT_ABI;
 	} else {
 		FFI_Type **pcopy = NULL;
 		if (param_count > 0) {
@@ -786,7 +858,10 @@ finish_func:
 			for (int i = 0; i < param_count; i++)
 				pcopy[i] = params[i];
 		}
-		FFI_Function *func = ffi_function_create(p->ctx, fptr, ret_ffi, pcopy, param_count);
+		ffi_abi func_abi = p->pending_abi;
+		p->pending_abi = FFI_DEFAULT_ABI;
+		FFI_Function *func =
+			ffi_function_create(p->ctx, fptr, ret_ffi, pcopy, param_count, func_abi);
 		if (func) {
 			ring_list_addpointer_gc(p->ctx->ring_state, p->result_list, func);
 			ring_list_addcustomringpointer_gc(p->ctx->ring_state, p->ctx->gc_list, func,
@@ -1013,7 +1088,20 @@ RING_FUNC(ring_cffi_bind)
 		return;
 	}
 
-	FFI_Function *func = ffi_function_create(ctx, func_ptr, ret_type, param_types, param_count);
+	ffi_abi abi = FFI_DEFAULT_ABI;
+	if (RING_API_PARACOUNT >= 5 && RING_API_ISSTRING(5)) {
+		if (!ffi_abi_parse(RING_API_GETSTRING(5), &abi)) {
+			ffi_set_error(ctx, "ffi_bind: ABI '%s' is not valid on this platform",
+						  RING_API_GETSTRING(5));
+			RING_API_ERROR(ffi_get_error(ctx));
+			if (param_types)
+				ring_state_free(ctx->ring_state, param_types);
+			return;
+		}
+	}
+
+	FFI_Function *func =
+		ffi_function_create(ctx, func_ptr, ret_type, param_types, param_count, abi);
 	if (!func) {
 		RING_API_ERROR(ffi_get_error(ctx));
 		if (param_types)

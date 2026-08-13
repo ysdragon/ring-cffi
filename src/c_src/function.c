@@ -7,7 +7,7 @@
 #include "ring_cffi_internal.h"
 
 FFI_Function *ffi_function_create(FFI_Context *ctx, void *func_ptr, FFI_Type *ret_type,
-								  FFI_Type **param_types, int param_count)
+								  FFI_Type **param_types, int param_count, ffi_abi abi)
 {
 	if (!func_ptr) {
 		ffi_set_error(ctx, "Invalid function pointer");
@@ -29,6 +29,7 @@ FFI_Function *ffi_function_create(FFI_Context *ctx, void *func_ptr, FFI_Type *re
 	memset(ftype, 0, sizeof(FFI_FuncType));
 	ftype->return_type = ret_type;
 	ftype->param_count = param_count;
+	ftype->abi = abi;
 
 	if (param_count > 0) {
 		ftype->param_types =
@@ -61,9 +62,10 @@ FFI_Function *ffi_function_create(FFI_Context *ctx, void *func_ptr, FFI_Type *re
 	}
 
 	ffi_status status =
-		ffi_prep_cif(&func->cif, FFI_DEFAULT_ABI, param_count, ret_type->ffi_type_ptr, arg_types);
+		ffi_prep_cif(&func->cif, ftype->abi, param_count, ret_type->ffi_type_ptr, arg_types);
 	if (status != FFI_OK) {
-		ffi_set_error(ctx, "Failed to prepare FFI call interface");
+		ffi_set_error(ctx, status == FFI_BAD_ABI ? "ABI not supported by libffi on this platform"
+												 : "Failed to prepare FFI call interface");
 		if (arg_types)
 			ring_state_free(ctx->ring_state, arg_types);
 		if (ftype->param_types)
@@ -156,6 +158,18 @@ RING_FUNC(ring_cffi_func)
 		}
 	}
 
+	ffi_abi abi = FFI_DEFAULT_ABI;
+	if (RING_API_PARACOUNT >= 5 && RING_API_ISSTRING(5)) {
+		if (!ffi_abi_parse(RING_API_GETSTRING(5), &abi)) {
+			ffi_set_error(ctx, "ffi_func: ABI '%s' is not valid on this platform",
+						  RING_API_GETSTRING(5));
+			RING_API_ERROR(ffi_get_error(ctx));
+			if (param_types)
+				ring_state_free(ctx->ring_state, param_types);
+			return;
+		}
+	}
+
 	void *func_ptr = ffi_library_symbol(lib, func_name);
 	if (!func_ptr) {
 		ffi_set_error(ctx, "Symbol '%s' not found in library", func_name);
@@ -165,7 +179,8 @@ RING_FUNC(ring_cffi_func)
 		return;
 	}
 
-	FFI_Function *func = ffi_function_create(ctx, func_ptr, ret_type, param_types, param_count);
+	FFI_Function *func =
+		ffi_function_create(ctx, func_ptr, ret_type, param_types, param_count, abi);
 	if (!func) {
 		RING_API_ERROR(ffi_get_error(ctx));
 		if (param_types)
@@ -249,7 +264,20 @@ RING_FUNC(ring_cffi_funcptr)
 		}
 	}
 
-	FFI_Function *func = ffi_function_create(ctx, func_ptr, ret_type, param_types, param_count);
+	ffi_abi abi = FFI_DEFAULT_ABI;
+	if (RING_API_PARACOUNT >= type_start_param + 1 && RING_API_ISSTRING(type_start_param + 1)) {
+		if (!ffi_abi_parse(RING_API_GETSTRING(type_start_param + 1), &abi)) {
+			ffi_set_error(ctx, "ffi_funcptr: ABI '%s' is not valid on this platform",
+						  RING_API_GETSTRING(type_start_param + 1));
+			RING_API_ERROR(ffi_get_error(ctx));
+			if (param_types)
+				ring_state_free(ctx->ring_state, param_types);
+			return;
+		}
+	}
+
+	FFI_Function *func =
+		ffi_function_create(ctx, func_ptr, ret_type, param_types, param_count, abi);
 	if (!func) {
 		RING_API_ERROR("ffi_funcptr: failed to create function handle");
 		if (param_types)

@@ -6,6 +6,202 @@
 
 #include "ring_cffi_internal.h"
 
+#if defined(FFI_TARGET_HAS_INT128) && defined(__SIZEOF_INT128__)
+typedef __int128 cffi_i128;
+typedef unsigned __int128 cffi_u128;
+#endif
+
+#ifndef LDBL_DECIMAL_DIG
+#define LDBL_DECIMAL_DIG 21
+#endif
+
+bool ffi_parse_i128(const char *s, void *out, bool is_unsigned)
+{
+#if defined(FFI_TARGET_HAS_INT128) && defined(__SIZEOF_INT128__)
+	if (!s || !out)
+		return false;
+	const char *p = s;
+	while (isspace((unsigned char)*p))
+		p++;
+	bool neg = false;
+	if (*p == '-') {
+		neg = true;
+		p++;
+	} else if (*p == '+') {
+		p++;
+	}
+	if (!*p || *p < '0' || *p > '9')
+		return false;
+
+	/* Magnitude limit: UINT128_MAX for unsigned, 2^127 for signed
+	   (the min-int magnitude), 2^127-1 for positive signed. */
+	cffi_u128 limit =
+		is_unsigned ? ~(cffi_u128)0 : (neg ? ((cffi_u128)1 << 127) : (((cffi_u128)1 << 127) - 1));
+	cffi_u128 acc = 0;
+	while (*p) {
+		if (*p < '0' || *p > '9')
+			return false;
+		unsigned digit = (unsigned)(*p - '0');
+		if (acc > (limit - digit) / 10)
+			return false; /* overflow */
+		acc = acc * 10 + digit;
+		p++;
+	}
+
+	if (is_unsigned) {
+		if (neg)
+			return false;
+		*(cffi_u128 *)out = acc;
+	} else if (neg) {
+		/* acc == 2^127 is INT128_MIN; the bit pattern is what two's
+		   complement stores, so write the magnitude directly. */
+		if (acc == ((cffi_u128)1 << 127)) {
+			*(cffi_u128 *)out = acc;
+		} else {
+			*(cffi_i128 *)out = -(cffi_i128)acc;
+		}
+	} else {
+		*(cffi_i128 *)out = (cffi_i128)acc;
+	}
+	return true;
+#else
+	(void)s;
+	(void)out;
+	(void)is_unsigned;
+	return false;
+#endif
+}
+
+size_t ffi_format_i128(char *buf, size_t sz, const void *src, bool is_unsigned)
+{
+#if defined(FFI_TARGET_HAS_INT128) && defined(__SIZEOF_INT128__)
+	cffi_i128 signed_val = 0;
+	cffi_u128 val;
+	if (is_unsigned) {
+		val = *(const cffi_u128 *)src;
+	} else {
+		signed_val = *(const cffi_i128 *)src;
+		/* Magnitude via two's-complement negation on the unsigned view —
+		   avoids UB (and the wrong digits) for INT128_MIN. */
+		val = (cffi_u128)signed_val;
+		val = ~val + 1;
+		if (signed_val >= 0)
+			val = (cffi_u128)signed_val;
+	}
+
+	char tmp[64];
+	int n = 0;
+	if (val == 0) {
+		tmp[n++] = '0';
+	} else {
+		while (val > 0) {
+			tmp[n++] = (char)('0' + (int)(val % 10));
+			val /= 10;
+		}
+	}
+	if (!is_unsigned && signed_val < 0)
+		tmp[n++] = '-';
+
+	size_t need = (size_t)n + 1;
+	if (sz < need) {
+		if (sz > 0)
+			buf[0] = '\0';
+		return need;
+	}
+	for (int i = 0; i < n; i++)
+		buf[i] = tmp[n - 1 - i];
+	buf[n] = '\0';
+	return need;
+#else
+	(void)src;
+	(void)is_unsigned;
+	if (sz > 0)
+		buf[0] = '\0';
+	return 1;
+#endif
+}
+
+bool ffi_parse_ld(const char *s, long double *out)
+{
+	if (!s || !out)
+		return false;
+	char *end = NULL;
+	errno = 0;
+	long double v = strtold(s, &end);
+	if (end == s)
+		return false;
+	while (end && isspace((unsigned char)*end))
+		end++;
+	if (*end != '\0')
+		return false;
+	*out = v;
+	return true;
+}
+
+size_t ffi_format_ld(char *buf, size_t sz, long double v)
+{
+	/* LDBL_DECIMAL_DIG significant digits round-trip exactly through
+	   strtold (21 for the x87 80-bit format). */
+	char tmp[128];
+	int n = snprintf(tmp, sizeof(tmp), "%.*Lg", (int)LDBL_DECIMAL_DIG, v);
+	if (n < 0)
+		n = 0;
+	if (n >= (int)sizeof(tmp))
+		n = (int)sizeof(tmp) - 1;
+	size_t need = (size_t)n + 1;
+	if (sz < need) {
+		if (sz > 0)
+			buf[0] = '\0';
+		return need;
+	}
+	memcpy(buf, tmp, (size_t)n + 1);
+	return need;
+}
+
+void ffi_complex_read_components(void *src, FFI_Type *type, double *re, double *im)
+{
+	switch (type->kind) {
+	case FFI_KIND_COMPLEX_FLOAT:
+		*re = (double)((float *)src)[0];
+		*im = (double)((float *)src)[1];
+		break;
+	case FFI_KIND_COMPLEX_DOUBLE:
+		*re = ((double *)src)[0];
+		*im = ((double *)src)[1];
+		break;
+	case FFI_KIND_COMPLEX_LONGDOUBLE:
+		*re = (double)((long double *)src)[0];
+		*im = (double)((long double *)src)[1];
+		break;
+	default:
+		*re = 0.0;
+		*im = 0.0;
+		break;
+	}
+}
+
+bool ffi_complex_pack(void *dst, FFI_Type *type, double re, double im)
+{
+	if (!dst || !type)
+		return false;
+	switch (type->kind) {
+	case FFI_KIND_COMPLEX_FLOAT:
+		((float *)dst)[0] = (float)re;
+		((float *)dst)[1] = (float)im;
+		return true;
+	case FFI_KIND_COMPLEX_DOUBLE:
+		((double *)dst)[0] = re;
+		((double *)dst)[1] = im;
+		return true;
+	case FFI_KIND_COMPLEX_LONGDOUBLE:
+		((long double *)dst)[0] = (long double)re;
+		((long double *)dst)[1] = (long double)im;
+		return true;
+	default:
+		return false;
+	}
+}
+
 double ffi_read_typed_value(void *src, FFI_Type *type)
 {
 	if (FFI_IS_POINTER_TYPE(type)) {
@@ -137,6 +333,10 @@ void ffi_push_to_ring(VM *vm, void *src, FFI_Type *type, bool is_ffi_arg)
 			ring_vm_api_retcpointer(vm, NULL, "FFI_Ptr");
 	} else if (FFI_IS_POINTER_TYPE(type)) {
 		ring_vm_api_retcpointer(vm, *(void **)src, "FFI_Ptr");
+	} else if (ffi_is_int128(type->kind)) {
+		char buf[64];
+		ffi_format_i128(buf, sizeof(buf), src, type->kind == FFI_KIND_UINT128);
+		ring_vm_api_retstring(vm, buf);
 	} else if (ffi_is_64bit_int(type->kind)) {
 		uint64_t uval;
 		int64_t ival;
@@ -241,6 +441,29 @@ void ffi_push_struct_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype
 			 rtype->info.union_type->name)
 		name = rtype->info.union_type->name;
 	ring_vm_api_retcpointer(vm, copy, name);
+}
+
+void ffi_push_complex_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype)
+{
+	/* A C99 _Complex value is returned to Ring as a [re, im] list.
+	   The list must be created through the VM (ring_vm_api_newlist): a
+	   bare state-GC list is not owned by the VM frame that retlist copies
+	   from, and the copy comes back empty. */
+	double re = 0.0, im = 0.0;
+	ffi_complex_read_components(src, rtype, &re, &im);
+	List *l = ring_vm_api_newlist(vm);
+	ring_list_adddouble_gc(ctx->ring_state, l, re);
+	ring_list_adddouble_gc(ctx->ring_state, l, im);
+	ring_vm_api_retlist(vm, l);
+}
+
+void ffi_push_i128_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype)
+{
+	/* 128-bit integers cross the boundary as exact decimal strings. */
+	(void)ctx;
+	char buf[64];
+	ffi_format_i128(buf, sizeof(buf), src, rtype->kind == FFI_KIND_UINT128);
+	ring_vm_api_retstring(vm, buf);
 }
 
 void ffi_ret_value(VM *vm, void *src, FFI_Type *type) { ffi_push_to_ring(vm, src, type, false); }

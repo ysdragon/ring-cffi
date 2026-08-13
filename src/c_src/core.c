@@ -68,6 +68,8 @@ void ffi_gc_free_func(void *state, void *ptr)
 	FFI_Function *func = (FFI_Function *)ptr;
 	if (!func)
 		return;
+	if (func->plan)
+		ffi_call_plan_free(func->plan);
 	if (func->type) {
 		if (func->type->param_types)
 			ring_state_free((RingState *)state, func->type->param_types);
@@ -383,6 +385,10 @@ RING_LIBINIT
 	RING_API_REGISTER("cffi_set", ring_cffi_set);
 	RING_API_REGISTER("cffi_get_i64", ring_cffi_get_i64);
 	RING_API_REGISTER("cffi_set_i64", ring_cffi_set_i64);
+	RING_API_REGISTER("cffi_get_i128", ring_cffi_get_i128);
+	RING_API_REGISTER("cffi_set_i128", ring_cffi_set_i128);
+	RING_API_REGISTER("cffi_get_ld", ring_cffi_get_ld);
+	RING_API_REGISTER("cffi_set_ld", ring_cffi_set_ld);
 	RING_API_REGISTER("cffi_deref", ring_cffi_deref);
 	RING_API_REGISTER("cffi_offset", ring_cffi_offset);
 	RING_API_REGISTER("cffi_struct", ring_cffi_struct);

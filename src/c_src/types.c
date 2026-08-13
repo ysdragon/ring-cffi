@@ -75,6 +75,20 @@ static ffi_type *ffi_get_primitive_type(FFI_TypeKind kind)
 			return &ffi_type_uint16;
 		else
 			return &ffi_type_uint32;
+#ifdef FFI_TARGET_HAS_COMPLEX_TYPE
+	case FFI_KIND_COMPLEX_FLOAT:
+		return &ffi_type_complex_float;
+	case FFI_KIND_COMPLEX_DOUBLE:
+		return &ffi_type_complex_double;
+	case FFI_KIND_COMPLEX_LONGDOUBLE:
+		return &ffi_type_complex_longdouble;
+#endif
+#ifdef FFI_TARGET_HAS_INT128
+	case FFI_KIND_INT128:
+		return &ffi_type_sint128;
+	case FFI_KIND_UINT128:
+		return &ffi_type_uint128;
+#endif
 	default:
 		return &ffi_type_void;
 	}
@@ -130,6 +144,19 @@ static size_t ffi_get_primitive_size(FFI_TypeKind kind)
 		return sizeof(void *);
 	case FFI_KIND_WCHAR_T:
 		return sizeof(wchar_t);
+#ifdef FFI_TARGET_HAS_COMPLEX_TYPE
+	case FFI_KIND_COMPLEX_FLOAT:
+		return 2 * sizeof(float);
+	case FFI_KIND_COMPLEX_DOUBLE:
+		return 2 * sizeof(double);
+	case FFI_KIND_COMPLEX_LONGDOUBLE:
+		return 2 * sizeof(long double);
+#endif
+#ifdef FFI_TARGET_HAS_INT128
+	case FFI_KIND_INT128:
+	case FFI_KIND_UINT128:
+		return 16;
+#endif
 	default:
 		return 0;
 	}
@@ -155,6 +182,110 @@ bool ffi_is_64bit_int(FFI_TypeKind kind)
 	default:
 		return false;
 	}
+}
+
+bool ffi_is_int128(FFI_TypeKind kind)
+{
+	return kind == FFI_KIND_INT128 || kind == FFI_KIND_UINT128;
+}
+
+/* Aggregate kinds travel through the by-value struct/union blob machinery
+   (ret_buf staging, callback byte copies). Complex types are aggregates
+   with a Ring [re, im] representation on top. */
+bool ffi_kind_is_aggregate(FFI_TypeKind kind)
+{
+	switch (kind) {
+	case FFI_KIND_STRUCT:
+	case FFI_KIND_UNION:
+	case FFI_KIND_COMPLEX_FLOAT:
+	case FFI_KIND_COMPLEX_DOUBLE:
+	case FFI_KIND_COMPLEX_LONGDOUBLE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool ffi_abi_parse(const char *name, ffi_abi *out)
+{
+	if (!name || !*name) {
+		*out = FFI_DEFAULT_ABI;
+		return true;
+	}
+	if (strcmp(name, "default") == 0) {
+		*out = FFI_DEFAULT_ABI;
+		return true;
+	}
+
+#if defined(__i386__) || defined(_M_IX86)
+	if (strcmp(name, "sysv") == 0 || strcmp(name, "cdecl") == 0) {
+		*out = FFI_SYSV;
+		return true;
+	}
+#ifdef FFI_STDCALL
+	if (strcmp(name, "stdcall") == 0) {
+		*out = FFI_STDCALL;
+		return true;
+	}
+#endif
+#ifdef FFI_THISCALL
+	if (strcmp(name, "thiscall") == 0) {
+		*out = FFI_THISCALL;
+		return true;
+	}
+#endif
+#ifdef FFI_FASTCALL
+	if (strcmp(name, "fastcall") == 0) {
+		*out = FFI_FASTCALL;
+		return true;
+	}
+#endif
+#ifdef FFI_MS_CDECL
+	if (strcmp(name, "ms_cdecl") == 0) {
+		*out = FFI_MS_CDECL;
+		return true;
+	}
+#endif
+#elif defined(__x86_64__) || defined(_M_X64)
+	if (strcmp(name, "sysv") == 0 || strcmp(name, "unix64") == 0 || strcmp(name, "default") == 0) {
+		*out = FFI_UNIX64;
+		return true;
+	}
+	if (strcmp(name, "win64") == 0) {
+		*out = FFI_WIN64;
+		return true;
+	}
+#ifdef FFI_GNUW64
+	if (strcmp(name, "gnuw64") == 0) {
+		*out = FFI_GNUW64;
+		return true;
+	}
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	if (strcmp(name, "sysv") == 0) {
+		*out = FFI_SYSV;
+		return true;
+	}
+#ifdef FFI_WIN64
+	if (strcmp(name, "win64") == 0) {
+		*out = FFI_WIN64;
+		return true;
+	}
+#endif
+#elif defined(__arm__) || defined(_M_ARM)
+	if (strcmp(name, "sysv") == 0) {
+		*out = FFI_SYSV;
+		return true;
+	}
+#ifdef FFI_VFP
+	if (strcmp(name, "vfp") == 0) {
+		*out = FFI_VFP;
+		return true;
+	}
+#endif
+#endif
+
+	return false;
 }
 
 FFI_Type *ffi_type_primitive(FFI_Context *ctx, FFI_TypeKind kind)
@@ -296,6 +427,23 @@ static FFI_TypeKind parse_type_kind(const char *name)
 		return FFI_KIND_POINTER;
 	if (strcmp(name, "char*") == 0 || strcmp(name, "string") == 0 || strcmp(name, "cstring") == 0)
 		return FFI_KIND_STRING;
+
+#ifdef FFI_TARGET_HAS_INT128
+	if (strcmp(name, "__int128") == 0 || strcmp(name, "int128") == 0 ||
+		strcmp(name, "signed __int128") == 0)
+		return FFI_KIND_INT128;
+	if (strcmp(name, "unsigned __int128") == 0 || strcmp(name, "unsigned int128") == 0 ||
+		strcmp(name, "uint128") == 0)
+		return FFI_KIND_UINT128;
+#endif
+#ifdef FFI_TARGET_HAS_COMPLEX_TYPE
+	if (strcmp(name, "_Complex float") == 0 || strcmp(name, "complex float") == 0)
+		return FFI_KIND_COMPLEX_FLOAT;
+	if (strcmp(name, "_Complex double") == 0 || strcmp(name, "complex double") == 0)
+		return FFI_KIND_COMPLEX_DOUBLE;
+	if (strcmp(name, "_Complex long double") == 0 || strcmp(name, "complex long double") == 0)
+		return FFI_KIND_COMPLEX_LONGDOUBLE;
+#endif
 
 	return FFI_KIND_UNKNOWN;
 }

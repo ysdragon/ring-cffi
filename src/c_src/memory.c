@@ -375,7 +375,14 @@ RING_FUNC(ring_cffi_get)
 
 	void *elem_ptr = (char *)ptr + (index * type->size);
 
-	if (type->kind == FFI_KIND_STRING && type->pointer_depth == 0) {
+	if (ffi_is_int128(type->kind)) {
+		char buf[64];
+		ffi_format_i128(buf, sizeof(buf), elem_ptr, type->kind == FFI_KIND_UINT128);
+		RING_API_RETSTRING(buf);
+	} else if (ffi_kind_is_aggregate(type->kind)) {
+		RING_API_ERROR("ffi_get: complex/struct/union types are not scalar; read "
+					   "components at their byte offsets (or use a by-value call)");
+	} else if (type->kind == FFI_KIND_STRING && type->pointer_depth == 0) {
 		char *str_val = *(char **)elem_ptr;
 		if (str_val)
 			ring_vm_api_retstring((VM *)pPointer, str_val);
@@ -438,7 +445,19 @@ RING_FUNC(ring_cffi_set)
 
 	void *elem_ptr = (char *)ptr + (index * type->size);
 
-	if (FFI_IS_POINTER_TYPE(type)) {
+	if (ffi_is_int128(type->kind)) {
+		if (RING_API_ISSTRING(3)) {
+			if (!ffi_parse_i128(RING_API_GETSTRING(3), elem_ptr, type->kind == FFI_KIND_UINT128)) {
+				RING_API_ERROR("ffi_set: invalid or out-of-range int128 value");
+				return;
+			}
+		} else {
+			RING_API_ERROR("ffi_set: int128 values must be strings");
+		}
+	} else if (ffi_kind_is_aggregate(type->kind)) {
+		RING_API_ERROR("ffi_set: complex/struct/union types are not scalar; write "
+					   "components at their byte offsets");
+	} else if (FFI_IS_POINTER_TYPE(type)) {
 		void *val = NULL;
 		if (RING_API_ISCPOINTER(3)) {
 			List *valList = RING_API_GETLIST(3);
@@ -467,6 +486,11 @@ RING_FUNC(ring_cffi_set)
 			*(uint64_t *)elem_ptr = (uint64_t)strtoull(str, NULL, 10);
 		} else {
 			*(int64_t *)elem_ptr = (int64_t)strtoll(str, NULL, 10);
+		}
+	} else if (RING_API_ISSTRING(3) && type->kind == FFI_KIND_LONGDOUBLE) {
+		if (!ffi_parse_ld(RING_API_GETSTRING(3), (long double *)elem_ptr)) {
+			RING_API_ERROR("ffi_set: invalid long double string value");
+			return;
 		}
 	} else {
 		RING_API_ERROR("ffi_set: value type not supported");
@@ -521,6 +545,115 @@ RING_FUNC(ring_cffi_set_i64)
 	}
 
 	ptr[index] = val;
+}
+
+RING_FUNC(ring_cffi_get_i128)
+{
+	if (RING_API_PARACOUNT < 1 || !RING_API_ISCPOINTER(1)) {
+		RING_API_ERROR("ffi_get_i128(ptr [, index [, is_unsigned]]) expects a pointer");
+		return;
+	}
+
+	List *pList = RING_API_GETLIST(1);
+	void *ptr = ring_list_getpointer(pList, RING_CPOINTER_POINTER);
+	if (!ptr) {
+		RING_API_ERROR("ffi_get_i128: null pointer");
+		return;
+	}
+
+	size_t index = 0;
+	bool is_unsigned = false;
+	if (RING_API_PARACOUNT >= 2 && RING_API_ISNUMBER(2)) {
+		index = (size_t)RING_API_GETNUMBER(2);
+	}
+	if (RING_API_PARACOUNT >= 3 && RING_API_ISNUMBER(3)) {
+		is_unsigned = RING_API_GETNUMBER(3) != 0;
+	}
+
+	char buf[64];
+	ffi_format_i128(buf, sizeof(buf), (char *)ptr + index * 16, is_unsigned);
+	RING_API_RETSTRING(buf);
+}
+
+RING_FUNC(ring_cffi_set_i128)
+{
+	if (RING_API_PARACOUNT < 2 || !RING_API_ISCPOINTER(1) || !RING_API_ISSTRING(2)) {
+		RING_API_ERROR("ffi_set_i128(ptr, value_str [, index [, is_unsigned]]) expects "
+					   "pointer and string");
+		return;
+	}
+
+	List *pList = RING_API_GETLIST(1);
+	void *ptr = ring_list_getpointer(pList, RING_CPOINTER_POINTER);
+	if (!ptr) {
+		RING_API_ERROR("ffi_set_i128: null pointer");
+		return;
+	}
+
+	const char *val_str = RING_API_GETSTRING(2);
+	size_t index = 0;
+	bool is_unsigned = false;
+	if (RING_API_PARACOUNT >= 3 && RING_API_ISNUMBER(3)) {
+		index = (size_t)RING_API_GETNUMBER(3);
+	}
+	if (RING_API_PARACOUNT >= 4 && RING_API_ISNUMBER(4)) {
+		is_unsigned = RING_API_GETNUMBER(4) != 0;
+	}
+
+	if (!ffi_parse_i128(val_str, (char *)ptr + index * 16, is_unsigned)) {
+		RING_API_ERROR("ffi_set_i128: invalid or out-of-range int128 value");
+		return;
+	}
+}
+
+RING_FUNC(ring_cffi_get_ld)
+{
+	if (RING_API_PARACOUNT < 1 || !RING_API_ISCPOINTER(1)) {
+		RING_API_ERROR("ffi_get_ld(ptr [, index]) expects a pointer");
+		return;
+	}
+
+	List *pList = RING_API_GETLIST(1);
+	long double *ptr = (long double *)ring_list_getpointer(pList, RING_CPOINTER_POINTER);
+	if (!ptr) {
+		RING_API_ERROR("ffi_get_ld: null pointer");
+		return;
+	}
+
+	size_t index = 0;
+	if (RING_API_PARACOUNT >= 2 && RING_API_ISNUMBER(2)) {
+		index = (size_t)RING_API_GETNUMBER(2);
+	}
+
+	char buf[128];
+	ffi_format_ld(buf, sizeof(buf), ptr[index]);
+	RING_API_RETSTRING(buf);
+}
+
+RING_FUNC(ring_cffi_set_ld)
+{
+	if (RING_API_PARACOUNT < 2 || !RING_API_ISCPOINTER(1) || !RING_API_ISSTRING(2)) {
+		RING_API_ERROR("ffi_set_ld(ptr, value_str [, index]) expects pointer and string");
+		return;
+	}
+
+	List *pList = RING_API_GETLIST(1);
+	long double *ptr = (long double *)ring_list_getpointer(pList, RING_CPOINTER_POINTER);
+	if (!ptr) {
+		RING_API_ERROR("ffi_set_ld: null pointer");
+		return;
+	}
+
+	const char *val_str = RING_API_GETSTRING(2);
+	size_t index = 0;
+	if (RING_API_PARACOUNT >= 3 && RING_API_ISNUMBER(3)) {
+		index = (size_t)RING_API_GETNUMBER(3);
+	}
+
+	if (!ffi_parse_ld(val_str, &ptr[index])) {
+		RING_API_ERROR("ffi_set_ld: invalid long double string value");
+		return;
+	}
 }
 
 RING_FUNC(ring_cffi_deref)

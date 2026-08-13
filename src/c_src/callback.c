@@ -56,6 +56,15 @@ void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *user_data)
 			} else {
 				ring_list_addcpointer_gc(state, current_args, NULL, "FFI_Ptr");
 			}
+		} else if (ptype->kind == FFI_KIND_COMPLEX_FLOAT ||
+				   ptype->kind == FFI_KIND_COMPLEX_DOUBLE ||
+				   ptype->kind == FFI_KIND_COMPLEX_LONGDOUBLE) {
+			/* By-value _Complex callback argument arrives as [re, im] */
+			double re = 0.0, im = 0.0;
+			ffi_complex_read_components(args[i], ptype, &re, &im);
+			List *cl = ring_list_newlist_gc(state, current_args);
+			ring_list_adddouble_gc(state, cl, re);
+			ring_list_adddouble_gc(state, cl, im);
 		} else if (ptype->kind == FFI_KIND_STRING && ptype->pointer_depth == 0) {
 			char *str_val = *(char **)args[i];
 			if (str_val)
@@ -65,6 +74,10 @@ void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *user_data)
 		} else if (FFI_IS_POINTER_TYPE(ptype)) {
 			void *val = *(void **)args[i];
 			ring_list_addcpointer_gc(state, current_args, val, "FFI_Ptr");
+		} else if (ffi_is_int128(ptype->kind)) {
+			char buf[64];
+			ffi_format_i128(buf, sizeof(buf), args[i], ptype->kind == FFI_KIND_UINT128);
+			ring_list_addstring_gc(state, current_args, buf);
 		} else if (ffi_is_64bit_int(ptype->kind)) {
 			char buf[32];
 			if (ptype->kind == FFI_KIND_UINT64 || ptype->kind == FFI_KIND_ULONGLONG ||
@@ -102,6 +115,20 @@ void ffi_callback_handler(ffi_cif *cif, void *ret, void **args, void *user_data)
 						void *blob = ring_list_getpointer(ptr_list, RING_CPOINTER_POINTER);
 						if (blob)
 							memcpy(ret, blob, rtype->size > 0 ? rtype->size : 1);
+					}
+				} else if (ffi_is_int128(rtype->kind) && ring_list_isstring(res_list, res_idx)) {
+					ffi_parse_i128(ring_list_getstring(res_list, res_idx), ret,
+								   rtype->kind == FFI_KIND_UINT128);
+				} else if (rtype->kind == FFI_KIND_COMPLEX_FLOAT ||
+						   rtype->kind == FFI_KIND_COMPLEX_DOUBLE ||
+						   rtype->kind == FFI_KIND_COMPLEX_LONGDOUBLE) {
+					if (ring_list_islist(res_list, res_idx)) {
+						List *cl = ring_list_getlist(res_list, res_idx);
+						if (ring_list_getsize(cl) >= 2 && ring_list_isdouble(cl, 1) &&
+							ring_list_isdouble(cl, 2)) {
+							ffi_complex_pack(ret, rtype, ring_list_getdouble(cl, 1),
+											 ring_list_getdouble(cl, 2));
+						}
 					}
 				} else if (rtype->kind == FFI_KIND_POINTER || rtype->pointer_depth > 0) {
 					if (ring_list_islist(res_list, res_idx)) {
@@ -179,6 +206,20 @@ RING_FUNC(ring_cffi_callback)
 		}
 	}
 
+	ffi_abi abi = FFI_DEFAULT_ABI;
+	if (RING_API_PARACOUNT >= 4 && RING_API_ISSTRING(4)) {
+		if (!ffi_abi_parse(RING_API_GETSTRING(4), &abi)) {
+			ffi_set_error(ctx, "ffi_callback: ABI '%s' is not valid on this platform",
+						  RING_API_GETSTRING(4));
+			RING_API_ERROR(ffi_get_error(ctx));
+			if (arg_types)
+				ring_state_free(ctx->ring_state, arg_types);
+			if (param_types)
+				ring_state_free(ctx->ring_state, param_types);
+			return;
+		}
+	}
+
 	FFI_Callback *cb = (FFI_Callback *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Callback));
 	if (!cb) {
 		if (arg_types)
@@ -212,6 +253,7 @@ RING_FUNC(ring_cffi_callback)
 	ftype->return_type = ret_type;
 	ftype->param_types = param_types;
 	ftype->param_count = param_count;
+	ftype->abi = abi;
 	cb->type = ftype;
 
 	cb->closure = ffi_closure_alloc(sizeof(ffi_closure), &cb->code_ptr);
@@ -229,7 +271,7 @@ RING_FUNC(ring_cffi_callback)
 	}
 
 	ffi_status status =
-		ffi_prep_cif(&cb->cif, FFI_DEFAULT_ABI, param_count, ret_type->ffi_type_ptr, arg_types);
+		ffi_prep_cif(&cb->cif, ftype->abi, param_count, ret_type->ffi_type_ptr, arg_types);
 	if (status != FFI_OK) {
 		ffi_closure_free(cb->closure);
 		ring_state_free(ctx->ring_state, ftype);
@@ -240,7 +282,9 @@ RING_FUNC(ring_cffi_callback)
 			ring_state_free(ctx->ring_state, arg_types);
 		if (param_types)
 			ring_state_free(ctx->ring_state, param_types);
-		RING_API_ERROR("ffi_callback: failed to prepare cif");
+		RING_API_ERROR(status == FFI_BAD_ABI
+						   ? "ffi_callback: ABI not supported by libffi on this platform"
+						   : "ffi_callback: failed to prepare cif");
 		return;
 	}
 

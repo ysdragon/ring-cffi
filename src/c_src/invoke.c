@@ -76,7 +76,8 @@ int ffi_store_arg(FFI_Context *ctx, VM *pVM, List *aArgs, int i, int param_idx, 
 		if (aArgs) {
 			if (ring_list_islist(aArgs, i + 1)) {
 				List *argList = ring_list_getlist(aArgs, i + 1);
-				ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+				if (ring_list_ispointer(argList, RING_CPOINTER_POINTER))
+					ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
 			}
 		} else {
 			if (ring_vm_api_iscpointer((void *)pVM, param_idx)) {
@@ -91,6 +92,58 @@ int ffi_store_arg(FFI_Context *ctx, VM *pVM, List *aArgs, int i, int param_idx, 
 		memcpy(storage_ptr, ptr_val, ptype->size > 0 ? ptype->size : 1);
 		*out_size = ptype->size > 0 ? ptype->size : sizeof(int);
 		return 0;
+	}
+
+	if (ptype && (ptype->kind == FFI_KIND_COMPLEX_FLOAT || ptype->kind == FFI_KIND_COMPLEX_DOUBLE ||
+				  ptype->kind == FFI_KIND_COMPLEX_LONGDOUBLE)) {
+		/* By-value _Complex argument: an FFI blob pointer (raw bytes) or a
+		   [re, im] number list. Item-type checks matter: a plain list's
+		   first slot holds a double, not a cpointer, and reading it as a
+		   pointer yields garbage. */
+		void *ptr_val = NULL;
+		bool have_list = false;
+		double re = 0.0, im = 0.0;
+
+		if (aArgs) {
+			if (ring_list_islist(aArgs, i + 1)) {
+				List *argList = ring_list_getlist(aArgs, i + 1);
+				if (ring_list_ispointer(argList, RING_CPOINTER_POINTER)) {
+					ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+				} else if (ring_list_getsize(argList) >= 2 && ring_list_isdouble(argList, 1) &&
+						   ring_list_isdouble(argList, 2)) {
+					have_list = true;
+					re = ring_list_getdouble(argList, 1);
+					im = ring_list_getdouble(argList, 2);
+				}
+			}
+		} else {
+			if (ring_vm_api_iscpointer((void *)pVM, param_idx)) {
+				List *argList = ring_vm_api_getlist((void *)pVM, param_idx);
+				ptr_val = ring_list_getpointer(argList, RING_CPOINTER_POINTER);
+			} else if (ring_vm_api_islist((void *)pVM, param_idx)) {
+				List *argList = ring_vm_api_getlist((void *)pVM, param_idx);
+				if (ring_list_getsize(argList) >= 2 && ring_list_isdouble(argList, 1) &&
+					ring_list_isdouble(argList, 2)) {
+					have_list = true;
+					re = ring_list_getdouble(argList, 1);
+					im = ring_list_getdouble(argList, 2);
+				}
+			}
+		}
+
+		if (have_list) {
+			if (ffi_complex_pack(storage_ptr, ptype, re, im)) {
+				*out_size = ptype->size > 0 ? ptype->size : sizeof(double) * 2;
+				return 0;
+			}
+		}
+		if (ptr_val) {
+			memcpy(storage_ptr, ptr_val, ptype->size > 0 ? ptype->size : 1);
+			*out_size = ptype->size > 0 ? ptype->size : sizeof(int);
+			return 0;
+		}
+		ring_vm_error(pVM, "complex argument requires a [re, im] list or an FFI pointer");
+		return -1;
 	}
 
 	if (is_num) {
@@ -116,7 +169,23 @@ int ffi_store_arg(FFI_Context *ctx, VM *pVM, List *aArgs, int i, int param_idx, 
 	if (is_str) {
 		const char *str = aArgs ? ring_list_getstring(aArgs, i + 1)
 								: ring_vm_api_getstring((void *)pVM, param_idx);
-		if (ptype && ffi_is_64bit_int(ptype->kind)) {
+		if (ptype && ffi_is_int128(ptype->kind)) {
+			if (!ffi_parse_i128(str, storage_ptr, ptype->kind == FFI_KIND_UINT128)) {
+				ring_vm_error(pVM, "invalid int128 string value");
+				return -1;
+			}
+			*out_size = 16;
+			return 0;
+		} else if (ptype && ptype->kind == FFI_KIND_LONGDOUBLE) {
+			/* A string arg for a long double parameter keeps full 80-bit
+			   precision (numbers go through double) */
+			if (!ffi_parse_ld(str, (long double *)storage_ptr)) {
+				ring_vm_error(pVM, "invalid long double string value");
+				return -1;
+			}
+			*out_size = sizeof(long double);
+			return 0;
+		} else if (ptype && ffi_is_64bit_int(ptype->kind)) {
 			if (ptype->kind == FFI_KIND_UINT64 || ptype->kind == FFI_KIND_ULONGLONG ||
 				(ptype->kind == FFI_KIND_SIZE_T && sizeof(size_t) == 8) ||
 				(ptype->kind == FFI_KIND_UINTPTR_T && sizeof(uintptr_t) == 8) ||
@@ -252,18 +321,31 @@ int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 
 	{
 		FFI_Type *ret_type = func->type->return_type;
-		if (ret_type && (ret_type->kind == FFI_KIND_STRUCT || ret_type->kind == FFI_KIND_UNION)) {
-			/* By-value struct/union return: libffi writes the whole value
-			   into a caller-provided buffer of the type's size; the scalar
-			   union below would overflow for anything larger than 16 bytes. */
+		if (ret_type && (ffi_kind_is_aggregate(ret_type->kind) || ffi_is_int128(ret_type->kind))) {
+			/* By-value struct/union/complex/int128 return: libffi writes the
+			   whole value into a caller-provided buffer of the type's size;
+			   the scalar union below would overflow for anything larger than
+			   16 bytes and would be misaligned for 16-byte int128. */
 			size_t ret_size = ret_type->size > 0 ? ret_type->size : 1;
 			void *ret_buf = ring_state_calloc(ctx->ring_state, 1, ret_size);
 			if (!ret_buf) {
 				ring_vm_error(pVM, "out of memory");
 				goto cleanup;
 			}
-			ffi_call(&func->cif, FFI_FN(func->func_ptr), ret_buf, arg_values);
-			ffi_push_struct_return(ctx, pVM, ret_buf, ret_type);
+			if (!func->plan)
+				func->plan = ffi_call_plan_alloc(&func->cif);
+			if (func->plan)
+				ffi_call_plan_invoke(func->plan, FFI_FN(func->func_ptr), ret_buf, arg_values);
+			else
+				ffi_call(&func->cif, FFI_FN(func->func_ptr), ret_buf, arg_values);
+			if (ffi_is_int128(ret_type->kind))
+				ffi_push_i128_return(ctx, pVM, ret_buf, ret_type);
+			else if (ret_type->kind == FFI_KIND_COMPLEX_FLOAT ||
+					 ret_type->kind == FFI_KIND_COMPLEX_DOUBLE ||
+					 ret_type->kind == FFI_KIND_COMPLEX_LONGDOUBLE)
+				ffi_push_complex_return(ctx, pVM, ret_buf, ret_type);
+			else
+				ffi_push_struct_return(ctx, pVM, ret_buf, ret_type);
 			ring_state_free(ctx->ring_state, ret_buf);
 		} else {
 			union {
@@ -283,7 +365,12 @@ int ffi_call_function(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 			} result;
 
 			memset(&result, 0, sizeof(result));
-			ffi_call(&func->cif, FFI_FN(func->func_ptr), &result, arg_values);
+			if (!func->plan)
+				func->plan = ffi_call_plan_alloc(&func->cif);
+			if (func->plan)
+				ffi_call_plan_invoke(func->plan, FFI_FN(func->func_ptr), &result, arg_values);
+			else
+				ffi_call(&func->cif, FFI_FN(func->func_ptr), &result, arg_values);
 			ffi_push_return_value(pVM, &result, ret_type);
 		}
 
@@ -396,7 +483,7 @@ int ffi_call_variadic(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 	}
 
 	ffi_cif var_cif;
-	ffi_status status = ffi_prep_cif_var(&var_cif, FFI_DEFAULT_ABI, fixed_count, arg_count,
+	ffi_status status = ffi_prep_cif_var(&var_cif, func->type->abi, fixed_count, arg_count,
 										 func->type->return_type->ffi_type_ptr, arg_types);
 	if (status != FFI_OK) {
 		if (arg_types)
@@ -410,7 +497,7 @@ int ffi_call_variadic(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 	}
 
 	FFI_Type *ret_type = func->type->return_type;
-	if (ret_type && (ret_type->kind == FFI_KIND_STRUCT || ret_type->kind == FFI_KIND_UNION)) {
+	if (ret_type && (ffi_kind_is_aggregate(ret_type->kind) || ffi_is_int128(ret_type->kind))) {
 		size_t ret_size = ret_type->size > 0 ? ret_type->size : 1;
 		void *ret_buf = ring_state_calloc(ctx->ring_state, 1, ret_size);
 		if (!ret_buf) {
@@ -424,7 +511,14 @@ int ffi_call_variadic(FFI_Context *ctx, VM *pVM, FFI_Function *func, List *aArgs
 			return -1;
 		}
 		ffi_call(&var_cif, FFI_FN(func->func_ptr), ret_buf, arg_values);
-		ffi_push_struct_return(ctx, pVM, ret_buf, ret_type);
+		if (ffi_is_int128(ret_type->kind))
+			ffi_push_i128_return(ctx, pVM, ret_buf, ret_type);
+		else if (ret_type->kind == FFI_KIND_COMPLEX_FLOAT ||
+				 ret_type->kind == FFI_KIND_COMPLEX_DOUBLE ||
+				 ret_type->kind == FFI_KIND_COMPLEX_LONGDOUBLE)
+			ffi_push_complex_return(ctx, pVM, ret_buf, ret_type);
+		else
+			ffi_push_struct_return(ctx, pVM, ret_buf, ret_type);
 		ring_state_free(ctx->ring_state, ret_buf);
 	} else {
 		union {
@@ -542,6 +636,18 @@ RING_FUNC(ring_cffi_varfunc)
 		}
 	}
 
+	ffi_abi abi = FFI_DEFAULT_ABI;
+	if (RING_API_PARACOUNT >= 5 && RING_API_ISSTRING(5)) {
+		if (!ffi_abi_parse(RING_API_GETSTRING(5), &abi)) {
+			ffi_set_error(ctx, "ffi_varfunc: ABI '%s' is not valid on this platform",
+						  RING_API_GETSTRING(5));
+			RING_API_ERROR(ffi_get_error(ctx));
+			if (param_types)
+				ring_state_free(ctx->ring_state, param_types);
+			return;
+		}
+	}
+
 	FFI_Function *func = (FFI_Function *)ring_state_malloc(ctx->ring_state, sizeof(FFI_Function));
 	if (!func) {
 		if (param_types)
@@ -566,6 +672,7 @@ RING_FUNC(ring_cffi_varfunc)
 	ftype->param_types = param_types;
 	ftype->param_count = param_count;
 	ftype->is_variadic = true;
+	ftype->abi = abi;
 	func->type = ftype;
 	func->cif_prepared = false;
 

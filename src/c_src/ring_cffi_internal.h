@@ -83,6 +83,11 @@ typedef enum {
 	FFI_KIND_INTPTR_T,
 	FFI_KIND_UINTPTR_T,
 	FFI_KIND_WCHAR_T,
+	FFI_KIND_COMPLEX_FLOAT,
+	FFI_KIND_COMPLEX_DOUBLE,
+	FFI_KIND_COMPLEX_LONGDOUBLE,
+	FFI_KIND_INT128,
+	FFI_KIND_UINT128,
 	FFI_KIND_UNKNOWN
 } FFI_TypeKind;
 
@@ -133,6 +138,7 @@ typedef struct FFI_FuncType {
 	FFI_Type **param_types;
 	int param_count;
 	bool is_variadic;
+	ffi_abi abi;
 	ffi_cif cif;
 } FFI_FuncType;
 
@@ -158,6 +164,7 @@ typedef struct FFI_Function {
 	FFI_FuncType *type;
 	ffi_cif cif;
 	ffi_type **ffi_arg_types;
+	ffi_call_plan *plan; /* reusable call plan for fixed-signature invokes */
 	bool cif_prepared;
 } FFI_Function;
 
@@ -209,6 +216,7 @@ typedef struct CParser {
 	char error[256];
 	List *result_list;
 	int decl_count;
+	ffi_abi pending_abi; /* calling convention seen before the next declaration */
 } CParser;
 
 /* Thread-local context storage */
@@ -284,6 +292,21 @@ FFI_Type *ffi_type_ptr(FFI_Context *ctx, FFI_Type *base);
 FFI_Type *ffi_type_parse(FFI_Context *ctx, const char *type_str);
 size_t ffi_sizeof(FFI_Type *type);
 bool ffi_is_64bit_int(FFI_TypeKind kind);
+bool ffi_is_int128(FFI_TypeKind kind);
+bool ffi_kind_is_aggregate(FFI_TypeKind kind);
+
+/* ABI name <-> ffi_abi mapping. Returns false for names not valid on this
+   platform (strict: "stdcall" on x86-64 is rejected, not silently mapped). */
+bool ffi_abi_parse(const char *name, ffi_abi *out);
+
+/* Exact 128-bit integer bridging (Ring string <-> memory). Returns false on
+   parse failure/overflow. */
+bool ffi_parse_i128(const char *s, void *out, bool is_unsigned);
+size_t ffi_format_i128(char *buf, size_t sz, const void *src, bool is_unsigned);
+
+/* Exact long double bridging (Ring string <-> memory). */
+bool ffi_parse_ld(const char *s, long double *out);
+size_t ffi_format_ld(char *buf, size_t sz, long double v);
 
 /* ============================================================
  * Library helpers
@@ -323,6 +346,10 @@ void ffi_push_to_ring(VM *vm, void *src, FFI_Type *type, bool is_ffi_arg);
 void ffi_push_return_value(VM *vm, void *result_ptr, FFI_Type *rtype);
 void ffi_push_struct_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype);
 void ffi_ret_value(VM *vm, void *src, FFI_Type *type);
+void ffi_push_complex_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype);
+void ffi_push_i128_return(FFI_Context *ctx, VM *vm, void *src, FFI_Type *rtype);
+bool ffi_complex_pack(void *dst, FFI_Type *type, double re, double im);
+void ffi_complex_read_components(void *src, FFI_Type *type, double *re, double *im);
 bool ffi_parse_bitfield_tag(const char *tag, FFI_TypeKind *kind, int *bit_off, int *bit_w);
 void ffi_read_bitfield(VM *vm, FFI_Context *ctx, void *ptr, FFI_TypeKind bf_kind, int bit_off,
 					   int bit_w);
@@ -334,7 +361,7 @@ void ffi_write_bitfield(VM *vm, FFI_Context *ctx, void *ptr, FFI_TypeKind bf_kin
  * ============================================================ */
 
 FFI_Function *ffi_function_create(FFI_Context *ctx, void *func_ptr, FFI_Type *ret_type,
-								  FFI_Type **param_types, int param_count);
+								  FFI_Type **param_types, int param_count, ffi_abi abi);
 FFI_Type **parse_type_list(FFI_Context *ctx, List *type_list, int *out_count);
 int ffi_store_arg(FFI_Context *ctx, VM *pVM, List *aArgs, int i, int param_idx, FFI_Type *ptype,
 				  char *storage_ptr, ffi_type **out_ffi_type, size_t *out_size);
@@ -371,6 +398,10 @@ void ring_cffi_get(void *pPointer);
 void ring_cffi_set(void *pPointer);
 void ring_cffi_get_i64(void *pPointer);
 void ring_cffi_set_i64(void *pPointer);
+void ring_cffi_get_i128(void *pPointer);
+void ring_cffi_set_i128(void *pPointer);
+void ring_cffi_get_ld(void *pPointer);
+void ring_cffi_set_ld(void *pPointer);
 void ring_cffi_deref(void *pPointer);
 void ring_cffi_offset(void *pPointer);
 void ring_cffi_struct(void *pPointer);
