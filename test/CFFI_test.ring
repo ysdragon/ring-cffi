@@ -1953,6 +1953,7 @@ class CFFITest
 
 	func test_complex_cstruct_field
 		try
+			nC = cffi_sizeof("_Complex double")
 			oTest = new FFI(cLibcPath)
 			oTest.cdef("struct ComplexPair { _Complex double z; int tag; };")
 			t = cffi_typeof("ComplexPair")
@@ -2040,6 +2041,12 @@ class CFFITest
 		c1 = cffi_get_ld(p)
 		assert(c1 != "", "ldGet returns a value")
 		assertEq(c1, cffi_get_ld(p), "ldGet stable across reads")
+		# On platforms where long double == double (e.g. MSVC x64) the string
+		# path cannot keep more digits than the number path, so the
+		# beyond-double-precision assertion cannot hold there.
+		if cffi_sizeof("long double") <= 8
+			return
+		ok
 		# String bridging must keep more precision than a double can hold:
 		# the same digits pushed through a Ring number lose precision at
 		# digit ~17, while the string path keeps ~21 significant digits.
