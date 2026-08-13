@@ -24,7 +24,7 @@
 -   🎛️ **Calling Conventions (ABI Selection)**: `stdcall`, `thiscall`, `fastcall`, `ms_cdecl`, `win64` and more via `setAbi()` — or recorded automatically from `__stdcall`/`__cdecl`/`__fastcall`/`__thiscall` in `cdef()` declarations
 -   🧬 **C99 Complex Types**: `_Complex float`, `_Complex double`, `_Complex long double` by-value arguments, returns, and callbacks via `[re, im]` lists
 -   🔢 **128-bit Integers**: `__int128`/`uint128` arguments, returns, and callbacks bridged as exact decimal strings
--   🎯 **Long Double Precision**: 80-bit `long double` bridged as exact decimal strings, keeping digits beyond double precision
+-   🎯 **Long Double Precision**: full-precision `long double` bridged as exact decimal strings, keeping digits beyond double precision
 -   🔢 **Pointer Operations**: Pointer arithmetic, dereferencing, read/write access, safe type casting
 -   🏗️ **Struct Support**: Define and manipulate C structs with named field access and nested dot notation
 -   🔗 **Union Support**: Define and use C unions
@@ -52,7 +52,7 @@ ringpm install ring-cffi from ysdragon
 > 
 > When reading these values from C, you will receive a string (e.g., `"9223372036854775807"`); when writing them to C, you must provide a string. Use the high-level `i64Get()`/`i64Set()` methods or the low-level `cffi_get_i64()`/`cffi_set_i64()` functions to ensure data integrity.
 >
-> The same string bridging covers the other types double cannot hold exactly: **128-bit integers** (`__int128`/`uint128` — `i128Get()`/`i128Set()`, `cffi_get_i128()`/`cffi_set_i128()`) and **80-bit `long double`** (`ldGet()`/`ldSet()`, `cffi_get_ld()`/`cffi_set_ld()`, 21 significant digits). Passing a string where a `long double` parameter is expected also keeps full precision.
+> The same string bridging covers the other types double cannot hold exactly: **128-bit integers** (`__int128`/`uint128` — `i128Get()`/`i128Set()`, `cffi_get_i128()`/`cffi_set_i128()`) and **`long double`** (`ldGet()`/`ldSet()`, `cffi_get_ld()`/`cffi_set_ld()` — exact string round-trip with up to 21 digits on x86, 34 on Linux AArch64). Passing a string where a `long double` parameter is expected also keeps full precision.
 
 ```ring
 load "cffi.ring"
@@ -413,6 +413,7 @@ new FFI("user32.dll") {  # 32-bit Windows
 `cdef()` records calling conventions from the declaration text automatically:
 
 ```ring
+oTest = new FFI("user32.dll")
 # __stdcall is picked up from the declaration itself
 oTest.cdef("int __stdcall Foo(int, int);")
 oTest.bindAll()
@@ -420,7 +421,7 @@ oTest.bindAll()
 
 ### C99 Complex Types
 
-`_Complex float`, `_Complex double`, and `_Complex long double` work as by-value arguments, returns, struct fields, and callbacks. Ring represents a complex value as a `[re, im]` list; functions returning complex produce a list.
+`_Complex float`, `_Complex double`, and `_Complex long double` work as by-value arguments, returns, struct fields, and callbacks. Ring represents a complex value as a `[re, im]` list; functions returning complex produce a list. *(Not available when libffi is built with MSVC — see [Platform & ABI Notes](#platform--abi-notes).)*
 
 ```ring
 load "cffi.ring"
@@ -467,7 +468,7 @@ new FFI("libgcc_s.so.1") {
 
 ### Long Double Precision Bridge
 
-Ring numbers are doubles, so `long double` values round at ~17 significant digits. Use the string bridge to keep all ~21 digits of the 80-bit format:
+Ring numbers are doubles, so `long double` values round at ~17 significant digits. Use the string bridge to keep full precision: *(On MSVC, `long double` is stored as a 64-bit double — see [Platform & ABI Notes](#platform--abi-notes).)*
 
 ```ring
 load "cffi.ring"
@@ -486,13 +487,30 @@ oFmodl = ffi.cFunc("fmodl", "long double", ["long double", "long double"])
 ? ffi.invoke(oFmodl, ["1e400", "7"])  # 1e400 is beyond double range — carried exactly
 ```
 
+## 🖥️ Platform & ABI Notes
+
+Precision-sensitive features and calling conventions depend on the target compiler, architecture, and platform ABI:
+
+| Feature | GCC / Clang (Linux, macOS, FreeBSD, MinGW) | MSVC (Windows) |
+|---|---|---|
+| `_Complex` types | ✅ Full support (C99 `_Complex`) | ❌ Unavailable — libffi omits `FFI_TARGET_HAS_COMPLEX_TYPE` on MSVC |
+| `__int128` | ✅ Supported on 64-bit targets (unavailable on 32-bit) | ❌ Unavailable — no native `__int128_t` |
+| `long double` | ⚠️ **Arch-dependent:**<br>• x86/x64: 80-bit x87 (~18–19 digits precision)<br>• Linux AArch64: 128-bit IEEE quad (~34 digits)<br>• Apple Silicon: 64-bit double (identical to MSVC) | ❌ Stored as 64-bit double (string and number bridging are equivalent) |
+
+### Calling Conventions
+
+Calling conventions depend on the CPU architecture and OS ABI:
+- **32-bit x86:** Supports `stdcall`, `thiscall`, `fastcall`, and `cdecl` (`ms_cdecl`).
+- **x86-64:** Uses `sysv` / `unix64` on Unix-like OSes and `win64` (or `gnuw64` for MinGW) on Windows.
+- **ARM / ARM64:** Uses standard AAPCS / Apple calling conventions; x86-specific convention names are not supported.
+
 ## 📚 API Reference
 
 ### FFI Class
 
 | Method | Taken Arguments | Description |
 |--------|-----------------|-------------|
-| `new FFI[(cPath]]` | `cPath`: string (optional) — library path | Create FFI instance, optionally loading a library |
+| `new FFI([cPath])` | `cPath`: string (optional) — library path | Create FFI instance, optionally loading a library |
 | `loadLib(cPath)` | `cPath`: string — library path | Load a shared library |
 | `library()` | *(none)* | Get the raw library handle |
 | `cFunc(cName, cRetType, [aArgTypes])` | `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Create a C function wrapper |
@@ -509,7 +527,7 @@ oFmodl = ffi.cFunc("fmodl", "long double", ["long double", "long double"])
 | `i64Set(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — 64-bit integer as string, `nIndex`: number (optional) — array index | Write 64-bit integer from string |
 | `i128Get(pPtr, [nIndex, nUnsigned])` | `pPtr`: pointer — memory pointer, `nIndex`: number (pass NULL for none), `nUnsigned`: number — 1 for unsigned | Read 128-bit integer as string (exact) |
 | `i128Set(pPtr, cValue, [nIndex, nUnsigned])` | `pPtr`: pointer — memory pointer, `cValue`: string — 128-bit integer as string, `nIndex`: number (pass NULL for none), `nUnsigned`: number — 1 for unsigned | Write 128-bit integer from string |
-| `ldGet(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read long double as string (21 significant digits) |
+| `ldGet(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read long double as string (exact round-trip: up to 21 digits on x86, 34 on Linux AArch64) |
 | `ldSet(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — long double as string, `nIndex`: number (optional) — array index | Write long double from string (exact) |
 | `setAbi(cAbi)` | `cAbi`: string — ABI name (`default`, `sysv`, `stdcall`, `thiscall`, `fastcall`, `ms_cdecl`, `win64`, ...) | Set the calling convention for subsequently created functions |
 | `deref(pPtr)` | `pPtr`: pointer — pointer to dereference | Dereference a pointer, returning the pointed-to pointer |
@@ -568,7 +586,7 @@ These are the underlying native C extension functions exposed to Ring via `RING_
 | `cffi_set_i64(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — 64-bit integer string, `nIndex`: number (optional) — array index | Write 64-bit integer from string |
 | `cffi_get_i128(pPtr, [nIndex, nUnsigned])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index, `nUnsigned`: number (optional) — 1 for unsigned | Read 128-bit integer as string |
 | `cffi_set_i128(pPtr, cValue, [nIndex, nUnsigned])` | `pPtr`: pointer — memory pointer, `cValue`: string — 128-bit integer string, `nIndex`: number (optional) — array index, `nUnsigned`: number (optional) — 1 for unsigned | Write 128-bit integer from string |
-| `cffi_get_ld(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read long double as string (21 significant digits) |
+| `cffi_get_ld(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read long double as string (exact round-trip: up to 21 digits on x86, 34 on Linux AArch64) |
 | `cffi_set_ld(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — long double string, `nIndex`: number (optional) — array index | Write long double from string (exact round-trip) |
 | `cffi_deref(pPtr, [cType])` | `pPtr`: pointer — pointer to dereference, `cType`: string (optional) — type name | Dereference a pointer |
 | `cffi_offset(pPtr, nOffset)` | `pPtr`: pointer — base pointer, `nOffset`: number — byte offset | Offset a pointer by bytes |
