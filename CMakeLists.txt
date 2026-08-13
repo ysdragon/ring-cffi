@@ -53,7 +53,7 @@ if(NOT EXISTS "${FFI_LIBFFI_DIR}/src/prep_cif.c")
     FetchContent_Declare(
         libffi
         GIT_REPOSITORY https://github.com/libffi/libffi.git
-        GIT_TAG        v3.5.2
+        GIT_TAG        v3.8.0
         SOURCE_DIR     ${FFI_LIBFFI_DIR}
     )
     FetchContent_MakeAvailable(libffi)
