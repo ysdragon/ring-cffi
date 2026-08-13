@@ -20,3 +20,118 @@ jobs:
       uses: ysdragon/ring-action@v1
       with:
         file: "test/CFFI_test.ring"
+
+  windows-arm64:
+    runs-on: windows-11-arm
+    steps:
+    - name: Checkout ring-cffi
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    - name: Clone Ring Source
+      uses: actions/checkout@v6
+      with:
+        repository: ring-lang/ring
+        path: ring
+        fetch-depth: 1
+        ref: master
+
+    - name: Set up MSVC Developer Command Prompt
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: arm64
+
+    - name: Configure and Build Ring Language
+      shell: cmd
+      run: |
+        cd ring/language
+        cmake . -A ARM64
+        cmake --build . --config Release --parallel
+        cmake --install .
+
+    - name: Add ring/bin to PATH
+      shell: pwsh
+      run: |
+        echo "$((Get-Location).Path)\ring\bin" >> $env:GITHUB_PATH
+
+    - name: Run tests
+      shell: cmd
+      working-directory: test
+      run: ring CFFI_test.ring
+
+  windows-x86:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout ring-cffi
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    - name: Clone Ring Source
+      uses: actions/checkout@v6
+      with:
+        repository: ring-lang/ring
+        path: ring
+        fetch-depth: 1
+        ref: master
+
+    - name: Set up MSVC Developer Command Prompt
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x86
+
+    - name: Configure and Build Ring Language
+      shell: cmd
+      run: |
+        cd ring/language
+        cmake . -A Win32
+        cmake --build . --config Release --parallel
+        cmake --install .
+
+    - name: Add ring/bin to PATH
+      shell: pwsh
+      run: |
+        echo "$((Get-Location).Path)\ring\bin" >> $env:GITHUB_PATH
+
+    - name: Run tests
+      shell: cmd
+      working-directory: test
+      run: ring CFFI_test.ring
+
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    - name: Build in FreeBSD VM and run tests
+      id: freebsd_test
+      uses: vmactions/freebsd-vm@v1
+      with:
+        release: "15.1"
+        arch: amd64
+        usesh: true
+        sync: rsync
+        mem: 4096
+        prepare: |
+          pkg update -f
+          pkg install -y cmake git ninja pkgconf
+
+        run: |
+          # Clone Ring Source
+          git clone --branch master --depth 1 https://github.com/ring-lang/ring.git ring
+          cd ring
+
+          # Build and Install Ring Language
+          cd language
+          cmake . -DCMAKE_BUILD_TYPE=Release -GNinja
+          ninja install
+          cd ../..
+
+          # Add ring/bin to PATH and run the test suite
+          export PATH=$PWD/ring/bin:$PATH
+          export LD_LIBRARY_PATH=$PWD/ring/lib:${LD_LIBRARY_PATH:-}
+          cd test
+          ring CFFI_test.ring
