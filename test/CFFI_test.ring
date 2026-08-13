@@ -151,6 +151,8 @@ class CFFITest
 		# NULL = no libm on this platform (by-value struct ARG test uses cabs)
 		if isWindows()
 			return NULL
+		but isFreeBSD()
+			return "libm.so.5"
 		but isMacOSX()
 			return cLibcPath
 		else
@@ -1444,10 +1446,13 @@ class CFFITest
 		assertEq(nLen, 13, "invoke(strlen) should return correct length")
 
 	func test_invoke_no_args
-		oTest = new FFI(cLibcPath)
 		if isWindows()
-			oFunc = oTest.cFunc("_getpid", "int", NULL)
+			# msvcrt.dll does not export _getpid on ARM64 Windows, so use
+			# kernel32.dll's GetCurrentProcessId instead.
+			oTest = new FFI("kernel32.dll")
+			oFunc = oTest.cFunc("GetCurrentProcessId", "uint32", NULL)
 		else
+			oTest = new FFI(cLibcPath)
 			oFunc = oTest.cFunc("getpid", "int", NULL)
 		ok
 		pid = oTest.invoke(oFunc, NULL)
@@ -1985,6 +1990,11 @@ class CFFITest
 			p = cffi_new("int128")
 		catch
 			return  # int128 unsupported on this platform
+		done
+		try
+			cffi_set_i128(p, "1", NULL, 0)
+		catch
+			return  # int128 value conversion needs compiler 128-bit support (missing on MSVC)
 		done
 		cffi_set_i128(p, "170141183460469231731687303715884105727", NULL, 0)
 		assertEq(cffi_get_i128(p, NULL, 0), "170141183460469231731687303715884105727",
