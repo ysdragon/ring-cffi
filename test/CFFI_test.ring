@@ -392,6 +392,35 @@ class CFFITest
 		run("test_bind_variadic_mixed_batch", :test_bind_variadic_mixed_batch)
 		? ""
 
+		? "Testing ABI Selection..."
+		run("test_abi_default_explicit", :test_abi_default_explicit)
+		run("test_abi_invalid", :test_abi_invalid)
+		run("test_abi_set_abi", :test_abi_set_abi)
+		? ""
+
+		? "Testing C99 Complex Types..."
+		run("test_complex_sizeof", :test_complex_sizeof)
+		run("test_complex_byval_arg", :test_complex_byval_arg)
+		run("test_complex_byval_return", :test_complex_byval_return)
+		run("test_complex_callback_create", :test_complex_callback_create)
+		run("test_complex_cstruct_field", :test_complex_cstruct_field)
+		? ""
+
+		? "Testing 128-bit Integers..."
+		run("test_int128_sizeof", :test_int128_sizeof)
+		run("test_int128_set_get", :test_int128_set_get)
+		run("test_int128_divide", :test_int128_divide)
+		? ""
+
+		? "Testing Long Double Precision..."
+		run("test_long_double_bridge", :test_long_double_bridge)
+		run("test_long_double_string_arg", :test_long_double_string_arg)
+		? ""
+
+		? "Testing Call Plans..."
+		run("test_call_plan_loop", :test_call_plan_loop)
+		? ""
+
 		# Cleanup
 		cleanup()
 
@@ -1818,3 +1847,236 @@ class CFFITest
 			snprintf(pBuf, 32, "val=%d", 99)
 			assertEq(oTest.toString(pBuf), "val=99", "mixed batch: snprintf")
 		ok
+
+	# ==================== ABI Selection Tests ====================
+
+	func test_abi_default_explicit
+		oTest = new FFI(cLibcPath)
+		oFunc = cffi_func(oTest.library(), "strlen", "int", ["ptr"], "default")
+		pStr = cffi_string("Hello ABI")
+		nLen = cffi_invoke(oFunc, pStr)
+		assertEq(nLen, 9, "strlen with explicit default abi")
+		if isLinux() and getarch() = "x64"
+			oFunc2 = cffi_func(oTest.library(), "strlen", "int", ["ptr"], "unix64")
+			assertEq(cffi_invoke(oFunc2, pStr), 9, "strlen with unix64 abi")
+		ok
+
+	func test_abi_invalid
+		oTest = new FFI(cLibcPath)
+		nRaised = 0
+		try
+			oFunc = cffi_func(oTest.library(), "strlen", "int", ["ptr"], "not_an_abi")
+		catch
+			nRaised = 1
+		done
+		assertEq(nRaised, 1, "invalid abi name raises")
+		if getarch() = "x64"
+			nRaised = 0
+			try
+				oFunc = cffi_func(oTest.library(), "strlen", "int", ["ptr"], "stdcall")
+			catch
+				nRaised = 1
+			done
+			assertEq(nRaised, 1, "stdcall is rejected on 64-bit")
+		ok
+
+	func test_abi_set_abi
+		oTest = new FFI(cLibcPath)
+		oTest.setAbi("default")
+		oStrlen = oTest.cFunc("strlen", "int", ["ptr"])
+		pStr = oTest.string("setAbi")
+		assertEq(oTest.invoke(oStrlen, [pStr]), 6, "setAbi default works")
+		oTest.setAbi(NULL)
+		oAbs = oTest.cFunc("abs", "int", ["int"])
+		assertEq(oTest.invoke(oAbs, [-7]), 7, "setAbi NULL falls back to platform default")
+
+	# ==================== C99 Complex Type Tests ====================
+
+	func test_complex_sizeof
+		try
+			nSz = cffi_sizeof("_Complex double")
+		catch
+			return  # complex unsupported on this platform
+		done
+		assertEq(nSz, 16, "_Complex double size")
+		assertEq(cffi_sizeof("_Complex float"), 8, "_Complex float size")
+		assertEq(cffi_sizeof("_Complex long double"), 2 * cffi_sizeof("long double"),
+			"_Complex long double size")
+
+	func test_complex_byval_arg
+		cLibmPath = detectLibm()
+		if isNull(cLibmPath)
+			return
+		ok
+		pLibm = cffi_load(cLibmPath)
+		if cffi_isnull(cffi_sym(pLibm, "cabs"))
+			return
+		ok
+		oCabs = cffi_func(pLibm, "cabs", "double", ["_Complex double"])
+		nRes = cffi_invoke(oCabs, [[3.0, 4.0]])
+		assert(nRes > 4.99 and nRes < 5.01, "cabs(3+4i) via [re, im] list = 5")
+		# complex by value from a blob pointer
+		pZ = cffi_new("_Complex double")
+		cffi_set(cffi_offset(pZ, 0), "double", 0.0)
+		cffi_set(cffi_offset(pZ, 8), "double", 1.0)
+		nRes2 = cffi_invoke(oCabs, [pZ])
+		assert(nRes2 > 0.99 and nRes2 < 1.01, "cabs(i) via blob pointer = 1")
+
+	func test_complex_byval_return
+		cLibmPath = detectLibm()
+		if isNull(cLibmPath)
+			return
+		ok
+		pLibm = cffi_load(cLibmPath)
+		if cffi_isnull(cffi_sym(pLibm, "csqrt"))
+			return
+		ok
+		oCsqrt = cffi_func(pLibm, "csqrt", "_Complex double", ["_Complex double"])
+		aRes = cffi_invoke(oCsqrt, [[-1.0, 0.0]])
+		assert(isList(aRes) and len(aRes) >= 2, "csqrt returns a [re, im] list")
+		assert(aRes[1] > -0.01 and aRes[1] < 0.01, "csqrt(-1) re = 0, got " + aRes[1])
+		assert(aRes[2] > 0.99 and aRes[2] < 1.01, "csqrt(-1) im = 1, got " + aRes[2])
+		aRes2 = cffi_invoke(oCsqrt, [[3.0, 4.0]])
+		assert(aRes2[1] > 1.99 and aRes2[1] < 2.01, "csqrt(3+4i) re = 2")
+		assert(aRes2[2] > 0.99 and aRes2[2] < 1.01, "csqrt(3+4i) im = 1")
+
+	func test_complex_cb z
+		return [10, 20]
+
+	func test_complex_callback_create
+		try
+			oCb = cffi_callback("test_complex_cb", "_Complex double", ["_Complex double"])
+		catch
+			return  # complex unsupported on this platform
+		done
+		assertIsPointer(oCb, "complex callback creation with complex arg/return")
+
+	func test_complex_cstruct_field
+		try
+			oTest = new FFI(cLibcPath)
+			oTest.cdef("struct ComplexPair { _Complex double z; int tag; };")
+			t = cffi_typeof("ComplexPair")
+			nSz = cffi_struct_size(t)
+		catch
+			return  # complex unsupported on this platform
+		done
+		assertEq(nSz, 24, "ComplexPair size: 16-byte complex + int, align 8")
+		pS = cffi_struct_new(t)
+		pZ = cffi_field(pS, t, "z")
+		cffi_set(cffi_offset(pZ, 0), "double", 1.5)
+		cffi_set(cffi_offset(pZ, 8), "double", 2.5)
+		assertEq(cffi_get(cffi_offset(pZ, 0), "double"), 1.5, "complex field re")
+		assertEq(cffi_get(cffi_offset(pZ, 8), "double"), 2.5, "complex field im")
+
+	# ==================== 128-bit Integer Tests ====================
+
+	func test_int128_sizeof
+		try
+			nSz = cffi_sizeof("int128")
+		catch
+			return  # int128 unsupported on this platform
+		done
+		assertEq(nSz, 16, "int128 size")
+		assertEq(cffi_sizeof("uint128"), 16, "uint128 size")
+
+	func test_int128_set_get
+		try
+			p = cffi_new("int128")
+		catch
+			return  # int128 unsupported on this platform
+		done
+		cffi_set_i128(p, "170141183460469231731687303715884105727", NULL, 0)
+		assertEq(cffi_get_i128(p, NULL, 0), "170141183460469231731687303715884105727",
+			"int128 max roundtrip")
+		cffi_set_i128(p, "-170141183460469231731687303715884105728", NULL, 0)
+		assertEq(cffi_get_i128(p, NULL, 0), "-170141183460469231731687303715884105728",
+			"int128 min roundtrip")
+		cffi_set_i128(p, "340282366920938463463374607431768211455", NULL, 1)
+		assertEq(cffi_get_i128(p, NULL, 1), "340282366920938463463374607431768211455",
+			"uint128 max roundtrip")
+		# array indexing
+		pArr = cffi_new("int128", 2)
+		cffi_set_i128(pArr, "123456789012345678901234567890", 0, 0)
+		cffi_set_i128(pArr, "-987654321098765432109876543210", 1, 0)
+		assertEq(cffi_get_i128(pArr, 0, 0), "123456789012345678901234567890", "int128 array idx 0")
+		assertEq(cffi_get_i128(pArr, 1, 0), "-987654321098765432109876543210", "int128 array idx 1")
+		# overflow must be rejected
+		nRaised = 0
+		try
+			cffi_set_i128(p, "170141183460469231731687303715884105728", NULL, 0)
+		catch
+			nRaised = 1
+		done
+		assertEq(nRaised, 1, "int128 overflow rejected")
+
+	func test_int128_divide
+		try
+			cffi_sizeof("int128")
+		catch
+			return  # int128 unsupported on this platform
+		done
+		# __divti3 is exported by libgcc_s on GNU toolchains
+		try
+			pGcc = cffi_load("libgcc_s.so.1")
+		catch
+			return
+		done
+		if cffi_isnull(cffi_sym(pGcc, "__divti3"))
+			return
+		ok
+		oDiv = cffi_func(pGcc, "__divti3", "int128", ["int128", "int128"])
+		cQ = cffi_invoke(oDiv, ["170141183460469231731687303715884105727", "2"])
+		assertEq(cQ, "85070591730234615865843651857942052863",
+			"__divti3((2^127-1), 2)")
+		cQ2 = cffi_invoke(oDiv, ["-170141183460469231731687303715884105728", "7"])
+		assertEq(cQ2, "-24305883351495604533098186245126300818",
+			"__divti3(INT128_MIN, 7)")
+
+	# ==================== Long Double Precision Tests ====================
+
+	func test_long_double_bridge
+		p = cffi_new("long double")
+		cffi_set_ld(p, "3.14159265358979323846264338327950288")
+		c1 = cffi_get_ld(p)
+		assert(c1 != "", "ldGet returns a value")
+		assertEq(c1, cffi_get_ld(p), "ldGet stable across reads")
+		# String bridging must keep more precision than a double can hold:
+		# the same digits pushed through a Ring number lose precision at
+		# digit ~17, while the string path keeps ~21 significant digits.
+		cffi_set_ld(p, "1.23456789012345678901234567890")
+		cStr = cffi_get_ld(p)
+		cffi_set(p, "long double", 1.23456789012345678901234567890)
+		cNum = cffi_get_ld(p)
+		assert(cStr != cNum, "string set keeps digits beyond double precision: " + cStr + " vs " + cNum)
+		# printf-style decimal roundtrip: set from the formatted string again
+		cffi_set_ld(p, cStr)
+		assertEq(cffi_get_ld(p), cStr, "ldSet(ldGet) roundtrip is stable")
+
+	func test_long_double_string_arg
+		cLibmPath = detectLibm()
+		if isNull(cLibmPath)
+			return
+		ok
+		pLibm = cffi_load(cLibmPath)
+		if cffi_isnull(cffi_sym(pLibm, "fmodl"))
+			return
+		ok
+		oFmodl = cffi_func(pLibm, "fmodl", "long double", ["long double", "long double"])
+		nRes = cffi_invoke(oFmodl, ["1e400", "7"])
+		assert(nRes >= 0 and nRes < 7, "fmodl(1e400, 7) in [0,7): string carries 80-bit value, got " + nRes)
+		nRes2 = cffi_invoke(oFmodl, [5.5, 2])
+		assertEq(nRes2, 1.5, "fmodl(5.5, 2) number args")
+
+	# ==================== Reusable Call Plan Test ====================
+
+	func test_call_plan_loop
+		oTest = new FFI(cLibcPath)
+		oStrlen = oTest.cFunc("strlen", "int", ["ptr"])
+		pStr = oTest.string("plan-loop")
+		for i = 1 to 200
+			n = oTest.invoke(oStrlen, [pStr])
+			if n != 9
+				raise("call plan loop mismatch at iteration " + i)
+			ok
+		next
+		assert(true, "200 invokes through the reusable call plan")
