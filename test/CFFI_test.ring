@@ -2069,8 +2069,13 @@ class CFFITest
 			return
 		ok
 		oFmodl = cffi_func(pLibm, "fmodl", "long double", ["long double", "long double"])
-		nRes = cffi_invoke(oFmodl, ["1e400", "7"])
-		assert(nRes >= 0 and nRes < 7, "fmodl(1e400, 7) in [0,7): string carries 80-bit value, got " + nRes)
+		# 1e400 only fits a long double wider than double (x87 80-bit or IEEE
+		# quad); on double-sized long double platforms (MSVC, Apple Silicon)
+		# strtold overflows to inf and fmodl(inf, 7) is nan.
+		if cffi_sizeof("long double") > 8
+			nRes = cffi_invoke(oFmodl, ["1e400", "7"])
+			assert(nRes >= 0 and nRes < 7, "fmodl(1e400, 7) in [0,7): string carries extended-precision value, got " + nRes)
+		ok
 		nRes2 = cffi_invoke(oFmodl, [5.5, 2])
 		assertEq(nRes2, 1.5, "fmodl(5.5, 2) number args")
 
