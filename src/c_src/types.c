@@ -247,15 +247,17 @@ bool ffi_abi_parse(const char *name, ffi_abi *out)
 	}
 #endif
 #elif defined(__x86_64__) || defined(_M_X64)
-	if (strcmp(name, "sysv") == 0 || strcmp(name, "unix64") == 0 || strcmp(name, "default") == 0) {
+#if defined(X86_64) && !defined(X86_WIN64)
+	if (strcmp(name, "sysv") == 0 || strcmp(name, "unix64") == 0) {
 		*out = FFI_UNIX64;
 		return true;
 	}
+#endif
+#if defined(X86_64) || defined(X86_WIN64)
 	if (strcmp(name, "win64") == 0) {
 		*out = FFI_WIN64;
 		return true;
 	}
-#ifdef FFI_GNUW64
 	if (strcmp(name, "gnuw64") == 0) {
 		*out = FFI_GNUW64;
 		return true;
@@ -266,12 +268,10 @@ bool ffi_abi_parse(const char *name, ffi_abi *out)
 		*out = FFI_SYSV;
 		return true;
 	}
-#ifdef FFI_WIN64
 	if (strcmp(name, "win64") == 0) {
 		*out = FFI_WIN64;
 		return true;
 	}
-#endif
 #elif defined(__arm__) || defined(_M_ARM)
 	if (strcmp(name, "sysv") == 0) {
 		*out = FFI_SYSV;
