@@ -21,6 +21,10 @@
 
 -   🔌 **Dynamic Library Loading**: Load shared libraries (.so, .dll, .dylib) at runtime
 -   📞 **C Function Calls**: Call C functions directly from Ring with automatic type conversion
+-   🎛️ **Calling Conventions (ABI Selection)**: `stdcall`, `thiscall`, `fastcall`, `ms_cdecl`, `win64` and more via `setAbi()` — or recorded automatically from `__stdcall`/`__cdecl`/`__fastcall`/`__thiscall` in `cdef()` declarations
+-   🧬 **C99 Complex Types**: `_Complex float`, `_Complex double`, `_Complex long double` by-value arguments, returns, and callbacks via `[re, im]` lists
+-   🔢 **128-bit Integers**: `__int128`/`uint128` arguments, returns, and callbacks bridged as exact decimal strings
+-   🎯 **Long Double Precision**: 80-bit `long double` bridged as exact decimal strings, keeping digits beyond double precision
 -   🔢 **Pointer Operations**: Pointer arithmetic, dereferencing, read/write access, safe type casting
 -   🏗️ **Struct Support**: Define and manipulate C structs with named field access and nested dot notation
 -   🔗 **Union Support**: Define and use C unions
@@ -47,6 +51,8 @@ ringpm install ring-cffi from ysdragon
 > **Safe 64-bit Integer Handling:** To prevent precision loss (as Ring natively stores numbers as 64-bit floats limited to $2^{53}-1$), all 64-bit integer types like `int64`, `uint64`, and `long long` are bridged as **strings**. 
 > 
 > When reading these values from C, you will receive a string (e.g., `"9223372036854775807"`); when writing them to C, you must provide a string. Use the high-level `i64Get()`/`i64Set()` methods or the low-level `cffi_get_i64()`/`cffi_set_i64()` functions to ensure data integrity.
+>
+> The same string bridging covers the other types double cannot hold exactly: **128-bit integers** (`__int128`/`uint128` — `i128Get()`/`i128Set()`, `cffi_get_i128()`/`cffi_set_i128()`) and **80-bit `long double`** (`ldGet()`/`ldSet()`, `cffi_get_ld()`/`cffi_set_ld()`, 21 significant digits). Passing a string where a `long double` parameter is expected also keeps full precision.
 
 ```ring
 load "cffi.ring"
@@ -390,6 +396,96 @@ ffi = new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
 ? ffi.strlen("Hello, World!") # 13
 ```
 
+### Calling Conventions (ABI Selection)
+
+Set the calling convention for subsequently created functions with `setAbi()` — required for classic 32-bit Windows `stdcall` APIs (kernel32/user32) and `thiscall`/`fastcall` C++ methods. Valid names are platform-dependent; an invalid name raises an error.
+
+```ring
+load "cffi.ring"
+
+new FFI("user32.dll") {  # 32-bit Windows
+    setAbi("stdcall")
+    oMsgBox = cFunc("MessageBoxA", "int", ["ptr", "ptr", "ptr", "uint"])
+    setAbi("default")  # back to the platform default
+}
+```
+
+`cdef()` records calling conventions from the declaration text automatically:
+
+```ring
+# __stdcall is picked up from the declaration itself
+oTest.cdef("int __stdcall Foo(int, int);")
+oTest.bindAll()
+```
+
+### C99 Complex Types
+
+`_Complex float`, `_Complex double`, and `_Complex long double` work as by-value arguments, returns, struct fields, and callbacks. Ring represents a complex value as a `[re, im]` list; functions returning complex produce a list.
+
+```ring
+load "cffi.ring"
+
+new FFI("libm.so.6") {  # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
+    # cabs(_Complex double) -> double
+    oCabs = cFunc("cabs", "double", ["_Complex double"])
+    ? invoke(oCabs, [[3.0, 4.0]])  # 5
+
+    # csqrt(_Complex double) -> _Complex double ([re, im] list)
+    oCsqrt = cFunc("csqrt", "_Complex double", ["_Complex double"])
+    z = invoke(oCsqrt, [[-1.0, 0.0]])
+    ? "sqrt(-1) = " + z[1] + " + " + z[2] + "i"  # 0 + 1i
+
+    # Complex struct fields: real part at offset 0, imaginary at +size
+    cdef("struct C { _Complex double z; int tag; };")
+}
+```
+
+Callbacks receive and return `[re, im]` lists:
+
+```ring
+func myComplexCb(z)
+    return [z[1] * 2, z[2] * 2]  # scale by 2
+```
+
+### 128-bit Integers
+
+`__int128`/`int128` and `unsigned __int128`/`uint128` arguments, returns, and callbacks are bridged as exact decimal strings (Ring doubles cannot exceed $2^{53}$, and 128-bit values far exceed `int64`).
+
+```ring
+load "cffi.ring"
+
+new FFI("libgcc_s.so.1") {
+    oDiv = cFunc("__divti3", "int128", ["int128", "int128"])
+    ? invoke(oDiv, ["170141183460469231731687303715884105727", "2"])
+    # 85070591730234615865843651857942052863 — exact
+
+    pI128 = alloc("int128")
+    i128Set(pI128, "340282366920938463463374607431768211455", NULL, 1)  # unsigned
+    ? i128Get(pI128, NULL, 1)
+}
+```
+
+### Long Double Precision Bridge
+
+Ring numbers are doubles, so `long double` values round at ~17 significant digits. Use the string bridge to keep all ~21 digits of the 80-bit format:
+
+```ring
+load "cffi.ring"
+
+new FFI {
+    pLd = alloc("long double")
+    ldSet(pLd, "1.23456789012345678901234567890", NULL)  # exact via strtold
+    ? ldGet(pLd, NULL)  # 1.23456789012345678901 — 21 significant digits
+}
+```
+
+String arguments keep full precision for `long double` parameters too (numbers still work, at double precision):
+
+```ring
+oFmodl = ffi.cFunc("fmodl", "long double", ["long double", "long double"])
+? ffi.invoke(oFmodl, ["1e400", "7"])  # 1e400 is beyond double range — carried exactly
+```
+
 ## 📚 API Reference
 
 ### FFI Class
@@ -411,6 +507,11 @@ ffi = new FFI("libc.so.6") { # msvcrt.dll (Windows), libSystem.B.dylib (macOS)
 | `ptrSet(pPtr, cType, value)` | `pPtr`: pointer — memory pointer, `cType`: string — type name, `value`: any — value to write | Write value to pointer |
 | `i64Get(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read 64-bit integer as string (avoids precision loss) |
 | `i64Set(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — 64-bit integer as string, `nIndex`: number (optional) — array index | Write 64-bit integer from string |
+| `i128Get(pPtr, [nIndex, nUnsigned])` | `pPtr`: pointer — memory pointer, `nIndex`: number (pass NULL for none), `nUnsigned`: number — 1 for unsigned | Read 128-bit integer as string (exact) |
+| `i128Set(pPtr, cValue, [nIndex, nUnsigned])` | `pPtr`: pointer — memory pointer, `cValue`: string — 128-bit integer as string, `nIndex`: number (pass NULL for none), `nUnsigned`: number — 1 for unsigned | Write 128-bit integer from string |
+| `ldGet(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read long double as string (21 significant digits) |
+| `ldSet(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — long double as string, `nIndex`: number (optional) — array index | Write long double from string (exact) |
+| `setAbi(cAbi)` | `cAbi`: string — ABI name (`default`, `sysv`, `stdcall`, `thiscall`, `fastcall`, `ms_cdecl`, `win64`, ...) | Set the calling convention for subsequently created functions |
 | `deref(pPtr)` | `pPtr`: pointer — pointer to dereference | Dereference a pointer, returning the pointed-to pointer |
 | `derefTyped(pPtr, cType)` | `pPtr`: pointer — pointer to dereference, `cType`: string — type name | Dereference a pointer with explicit type |
 | `offset(pPtr, nOffset)` | `pPtr`: pointer — base pointer, `nOffset`: number — byte offset | Offset a pointer by bytes |
@@ -457,14 +558,18 @@ These are the underlying native C extension functions exposed to Ring via `RING_
 | `cffi_tostring(pPtr)` | `pPtr`: pointer — C string pointer | Convert C string to Ring string |
 | `cffi_errno()` | *(none)* | Get last C errno value |
 | `cffi_strerror([nErr])` | `nErr`: number (optional) — error code | Get error string for errno |
-| `cffi_func(pLib, cName, cRetType, [aArgTypes])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Create a C function wrapper |
-| `cffi_funcptr(pPtr, cRetType, [aArgTypes])` | `pPtr`: pointer — function pointer, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Create wrapper from function pointer |
+| `cffi_func(pLib, cName, cRetType, [aArgTypes, cAbi])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings, `cAbi`: string (optional) — ABI name | Create a C function wrapper |
+| `cffi_funcptr(pPtr, cRetType, [aArgTypes, cAbi])` | `pPtr`: pointer — function pointer, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings, `cAbi`: string (optional) — ABI name | Create wrapper from function pointer |
 | `cffi_invoke(oFunc, [aArgs])` | `oFunc`: pointer — function handle, `aArgs`: list (optional) — arguments | Call a C function wrapper |
 | `cffi_sym(pLib, cName)` | `pLib`: pointer — library handle, `cName`: string — symbol name | Look up symbol in loaded library |
 | `cffi_get(pPtr, cType, [nIndex])` | `pPtr`: pointer — memory pointer, `cType`: string — type name, `nIndex`: number (optional) — array index | Read value from pointer |
 | `cffi_set(pPtr, cType, value, [nIndex])` | `pPtr`: pointer — memory pointer, `cType`: string — type name, `value`: any — value to write, `nIndex`: number (optional) — array index | Write value to pointer |
 | `cffi_get_i64(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read 64-bit integer as string |
 | `cffi_set_i64(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — 64-bit integer string, `nIndex`: number (optional) — array index | Write 64-bit integer from string |
+| `cffi_get_i128(pPtr, [nIndex, nUnsigned])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index, `nUnsigned`: number (optional) — 1 for unsigned | Read 128-bit integer as string |
+| `cffi_set_i128(pPtr, cValue, [nIndex, nUnsigned])` | `pPtr`: pointer — memory pointer, `cValue`: string — 128-bit integer string, `nIndex`: number (optional) — array index, `nUnsigned`: number (optional) — 1 for unsigned | Write 128-bit integer from string |
+| `cffi_get_ld(pPtr, [nIndex])` | `pPtr`: pointer — memory pointer, `nIndex`: number (optional) — array index | Read long double as string (21 significant digits) |
+| `cffi_set_ld(pPtr, cValue, [nIndex])` | `pPtr`: pointer — memory pointer, `cValue`: string — long double string, `nIndex`: number (optional) — array index | Write long double from string (exact round-trip) |
 | `cffi_deref(pPtr, [cType])` | `pPtr`: pointer — pointer to dereference, `cType`: string (optional) — type name | Dereference a pointer |
 | `cffi_offset(pPtr, nOffset)` | `pPtr`: pointer — base pointer, `nOffset`: number — byte offset | Offset a pointer by bytes |
 | `cffi_struct(cName, [aFields])` | `cName`: string — struct name, `aFields`: list (optional) — field definitions `[["name", "type"], ...]` | Define a C struct |
@@ -473,16 +578,16 @@ These are the underlying native C extension functions exposed to Ring via `RING_
 | `cffi_field(pPtr, pType, cField)` | `pPtr`: pointer — struct/union instance, `pType`: pointer — type definition, `cField`: string — field name (supports dot notation: `"pos.x"`) | Get pointer to struct field |
 | `cffi_field_offset(pType, cField)` | `pType`: pointer — struct/union type, `cField`: string — field name (supports dot notation: `"pos.x"`) | Get byte offset of field |
 | `cffi_struct_size(pType)` | `pType`: pointer — struct type | Get struct size in bytes |
-| `cffi_callback(cFunc, cRetType, [aArgTypes])` | `cFunc`: string — Ring function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings | Create C callback |
+| `cffi_callback(cFunc, cRetType, [aArgTypes, cAbi])` | `cFunc`: string — Ring function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings, `cAbi`: string (optional) — ABI name | Create C callback |
 | `cffi_enum(cName, aConsts)` | `cName`: string — enum name, `aConsts`: list — constant definitions `[["NAME", value], ...]` | Define a C enum |
 | `cffi_enum_value(pEnum, cName)` | `pEnum`: pointer — enum handle, `cName`: string — constant name | Get enum variant value |
 | `cffi_union(cName, [aFields])` | `cName`: string — union name, `aFields`: list (optional) — field definitions `[["name", "type"], ...]` | Define a C union |
 | `cffi_union_new(pType)` | `pType`: pointer — union definition | Allocate union instance |
 | `cffi_union_size(pType)` | `pType`: pointer — union type | Get union size in bytes |
-| `cffi_varfunc(pLib, cName, cRetType, [aArgTypes])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — fixed argument type strings (fixed count inferred from list length) | Create variadic function wrapper |
+| `cffi_varfunc(pLib, cName, cRetType, [aArgTypes, cAbi])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — fixed argument type strings (fixed count inferred from list length), `cAbi`: string (optional) — ABI name | Create variadic function wrapper |
 | `cffi_varcall(oFunc, [aArgs])` | `oFunc`: pointer — variadic function handle, `aArgs`: list (optional) — arguments | Call a variadic function wrapper |
 | `cffi_cdef(pLib, cDeclarations)` | `pLib`: pointer — library handle (can be NULL), `cDeclarations`: string — C definition source | Parse C definition string |
-| `cffi_bind([pLib, cName, cRetType, aArgTypes])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings. **No args** = bind all cdef functions | Bind C function(s) as native Ring function(s) |
+| `cffi_bind([pLib, cName, cRetType, aArgTypes, cAbi])` | `pLib`: pointer — library handle, `cName`: string — function name, `cRetType`: string — return type, `aArgTypes`: list (optional) — argument type strings, `cAbi`: string (optional) — ABI name. **No args** = bind all cdef functions | Bind C function(s) as native Ring function(s) |
 | `cffi_cast(pPtr, cType)` | `pPtr`: pointer — existing pointer, `cType`: string — new type label | Cast pointer to new type (same address, new label) |
 | `cffi_string_array(aStrings)` | `aStrings`: list — list of Ring strings | Create NULL-terminated `char**` array |
 | `cffi_wstring(cStr)` | `cStr`: string — Ring string (UTF-8) | Convert to `wchar_t*` buffer |
@@ -504,6 +609,8 @@ All type aliases recognized by the parser in `parse_type_kind()`:
 | `uint32`, `uint32_t`, `Uint32` | 32-bit unsigned int | 4 bytes |
 | `int64`, `int64_t`, `Sint64` | 64-bit signed int | 8 bytes |
 | `uint64`, `uint64_t`, `Uint64` | 64-bit unsigned int | 8 bytes |
+| `__int128`, `int128` | 128-bit signed int (bridged as strings) | 16 bytes |
+| `unsigned __int128`, `uint128` | 128-bit unsigned int (bridged as strings) | 16 bytes |
 
 #### Standard C Types
 
@@ -523,6 +630,9 @@ All type aliases recognized by the parser in `parse_type_kind()`:
 | `float` | Single precision float | 4 bytes |
 | `double` | Double precision float | 8 bytes |
 | `long double` | Extended precision float | platform-dependent |
+| `_Complex float`, `complex float` | C99 complex float (as `[re, im]` lists) | 8 bytes |
+| `_Complex double`, `complex double` | C99 complex double (as `[re, im]` lists) | 16 bytes |
+| `_Complex long double`, `complex long double` | C99 complex long double (as `[re, im]` lists) | platform-dependent |
 
 #### Pointers & Strings
 
@@ -549,7 +659,7 @@ All type aliases recognized by the parser in `parse_type_kind()`:
 | `bool`, `_Bool` | Boolean type | 1 byte |
 | `wchar_t` | Wide character type | platform-dependent |
 
-> **Note:** The parser also strips `const`, `volatile`, and `restrict` qualifiers. Pointer suffixes (e.g. `int**`) are handled automatically by counting trailing `*` characters in any type string.
+> **Note:** The parser also strips `const`, `volatile`, and `restrict` qualifiers. Pointer suffixes (e.g. `int**`) are handled automatically by counting trailing `*` characters in any type string. Complex types (`_Complex float`, `_Complex double`, `_Complex long double`) are written in full (e.g. `struct C { _Complex double z; };`). Calling-convention keywords (`__stdcall`, `__cdecl`, `__fastcall`, `__thiscall`, `WINAPI`, ...) are honored — the declared function is bound with the matching ABI (validity is platform-dependent; unsupported combinations fall back to the platform default).
 
 ## 📂 Examples
 
